@@ -67,6 +67,15 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 #jam { display: none; background: #3a2a00; }
 #jam p { font-size: 8vmin; font-weight: 800; margin: 0; }
 #jam small { font-size: 4.5vmin; color: #ffd98a; margin-top: 4vmin; display: block; }
+#jamStatus { font-size: 4.5vmin; color: #fff; min-height: 1.4em; margin-top: 5vmin; }
+#jamStaff { margin-top: 6vmin; display: flex; flex-direction: column; gap: 3vmin; width: min(80vmin, 340px); }
+#jamStaff .cap { font-size: 3.6vmin; color: #caa85a; }
+/* 係員用ボタン: 長押しで実行（子どもが触っても押し間違えないように） */
+.hold { position: relative; overflow: hidden; font: inherit; font-size: 4.6vmin; font-weight: 700; color: #fff;
+  padding: 3.6vmin 4vmin; border-radius: 2.5vmin; border: 2px solid #caa85a; background: rgba(0,0,0,.35); touch-action: none; }
+.hold i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: rgba(202,168,90,.45); }
+.hold span { position: relative; }
+.hold.busy { opacity: .5; pointer-events: none; }
 
 /* 開始（音とカメラの許可にタップが必要） */
 #start { background: var(--bg); z-index: 20; }
@@ -130,6 +139,12 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 <div id="jam" class="screen">
   <p>コインがうまく<br>落ちませんでした</p>
   <small>係員にお知らせください</small>
+  <div id="jamStatus"></div>
+  <div id="jamStaff">
+    <div class="cap">係員用（1秒長押し）</div>
+    <button class="hold" id="jamOpen"><i></i><span>ゲートをもう一度開ける</span></button>
+    <button class="hold" id="jamReset"><i></i><span>リセットして待機に戻る</span></button>
+  </div>
 </div>
 
 <div id="corner"></div>
@@ -181,7 +196,7 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
   const ANNOUNCE_MS = 3100;        // sound/0001.mp3 の長さ
   const DROP_TIMEOUT_MS = 3000;    // ゲートを開けてから受け皿が空になるまでの上限
   const THANKS_MS = 7800;          // sound/0004.mp3 の長さ
-  const JAM_MS = 6600;             // sound/0005.mp3 の長さ
+  const HOLD_MS = 1000;            // 係員用ボタンの長押し時間
   const OPEN_TIMEOUT_MS = 2500;    // ESP32 への指示の応答待ち
   const PING_MS = 5000;            // 待機中に ESP32 の生存確認をする間隔
   const PIX_DIFF = 28;             // 画素ごとの変化とみなす輝度差 (0-255)
@@ -359,9 +374,11 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
     setLamps(0);
     go.style.display = 'none';
     lights.style.display = 'flex';
-    msg.textContent = 'コインを入れてスタート！';
-    msg.className = 'pulse';
-    hint.textContent = camOK ? '1枚ずつ入れてね' : 'カメラ未接続（t キーでテスト）';
+    const blocked = holdOff && present;
+    msg.textContent = blocked ? '準備中です' : 'コインを入れてスタート！';
+    msg.className = blocked ? '' : 'pulse';
+    hint.textContent = blocked ? '受け皿にコインが残っています（係員が取り除いてください）'
+      : camOK ? '1枚ずつ入れてね' : 'カメラ未接続（t キーでテスト）';
   }
 
   async function waitUntil(fn, timeout) {
@@ -399,18 +416,70 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
       show(thanks); play('goal');
       await sleep(THANKS_MS);
     } else {
-      show(jam); play('jam');
-      await sleep(JAM_MS);
-      // 係員がゲートを開けるなどして空になるまで次を始めない
-      while (present) await sleep(200);
+      await jamLoop();
     }
     idle();
     busy = false;
   }
 
+  // ---------------- コイン詰まり ----------------
+  // 受け皿が空になる（手で取るなど）か、係員が長押しボタンで対応するまでこの画面にとどまる
+  let jamAction = null;
+  let holdOff = false;   // リセット後、受け皿が空になるまでスタートしない
+  async function jamLoop() {
+    jamAction = null;
+    $('jamStatus').textContent = '';
+    show(jam); play('jam');
+    for (;;) {
+      if (!present) return;                      // 空になった → 待機へ
+      if (jamAction === 'reset') {
+        // 待機に戻す。コインが残っていたら、係員が取り除くまで次のスタートを止めておく
+        // （背景を覚え直すと、取り除いたときの変化をコイン投入と誤検知してしまう）
+        holdOff = true;
+        return;
+      }
+      if (jamAction === 'open') {
+        jamAction = null;
+        $('jamStatus').textContent = 'ゲートを開けています…';
+        const sent = await sendOpen();
+        if (sent && await waitUntil(() => !present, DROP_TIMEOUT_MS)) {
+          show(thanks); play('goal');
+          await sleep(THANKS_MS);
+          return;
+        }
+        $('jamStatus').textContent = sent ? 'まだコインが残っています' : 'ESP32 につながりません';
+      }
+      await sleep(100);
+    }
+  }
+  function holdButton(el, action) {
+    const bar = el.querySelector('i');
+    let t0 = 0, timer = 0;
+    const step = () => {
+      const k = Math.min(1, (Date.now() - t0) / HOLD_MS);
+      bar.style.width = (k * 100) + '%';
+      if (k < 1) return;
+      cancel();
+      el.classList.add('busy');
+      setTimeout(() => el.classList.remove('busy'), 1500);
+      jamAction = action;
+    };
+    const begin = e => { e.preventDefault(); cancel(); t0 = Date.now(); timer = setInterval(step, 30); };
+    const cancel = () => { clearInterval(timer); bar.style.width = '0'; };
+    el.addEventListener('touchstart', begin, { passive: false });
+    el.addEventListener('touchend', cancel);
+    el.addEventListener('touchcancel', cancel);
+    el.addEventListener('mousedown', begin);
+    el.addEventListener('mouseup', cancel);
+    el.addEventListener('mouseleave', cancel);
+  }
+  holdButton($('jamOpen'), 'open');
+  holdButton($('jamReset'), 'reset');
+
   function tick() {
     analyze();
-    if (!busy && !setupOpen && present) race(false);
+    if (holdOff && !present) { holdOff = false; if (!busy) idle(); }
+    if (!busy && !setupOpen && present && !holdOff) race(false);
     if (setupOpen) drawPreview();
   }
 
