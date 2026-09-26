@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="F1貯金箱">
+<link rel="apple-touch-icon" href="icon.png">
+<title>F1スタート貯金箱</title>
+<!--
+  F1スタート貯金箱（iPhone 6s 版）— 紅陵祭2026 電気自動車同好会
+
+  iPhone の背面カメラで箱の中の受け皿を見張り、コインが載ったら
+  画面で F1 スタートシグナル → 一斉消灯の瞬間に ESP32 へ https://192.168.4.1/open を送る
+  → ESP32 がサーボのゲートを開ける → 受け皿が空になったらお礼。
+  iPhone は ESP32 が出す Wi-Fi「F1BANK」につなぐ（インターネット不要）。
+  オフラインでも開けるよう sw.js で自身をキャッシュする。
+
+  カメラは HTTPS か localhost でしか使えない（iOS Safari の制約）。
+  設定画面: 左上の角を 2 秒長押し。PC で試すときは t キーでテスト投入。
+-->
+<style>
+:root {
+  --bg: #0b0b0d;
+  --panel: #1a1a1f;
+  --lamp-off: #2a0909;
+  --lamp-on: #ff1a1a;
+  --text: #f4f4f4;
+  --muted: #9a9aa3;
+  --accent: #e10600;
+}
+* { box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden;
+  font-family: -apple-system, "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif; }
+.screen { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom)); text-align: center; }
+
+/* 待機・スタート画面 */
+#price { font-size: 6vmin; color: var(--muted); letter-spacing: .1em; }
+#price b { color: var(--text); font-size: 10vmin; }
+#msg { font-size: 8vmin; font-weight: 800; min-height: 1.4em; margin: 4vmin 0; }
+#msg.pulse { animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+#go { font-size: 22vmin; font-weight: 900; font-style: italic; color: #fff; display: none; letter-spacing: .05em; }
+
+#lights { display: flex; gap: 2.2vmin; padding: 3vmin; background: var(--panel); border-radius: 3vmin;
+  box-shadow: inset 0 0 0 .6vmin #000, 0 2vmin 5vmin rgba(0,0,0,.6); }
+.pod { display: flex; flex-direction: column; gap: 2.2vmin; padding: 2vmin; background: #050506; border-radius: 2.2vmin; }
+.lamp { width: 12vmin; height: 12vmin; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #3a1010, var(--lamp-off) 70%);
+  box-shadow: inset 0 0 1.2vmin #000; transition: background .04s, box-shadow .04s; }
+.pod.on .lamp { background: radial-gradient(circle at 35% 30%, #ffd0d0, var(--lamp-on) 45%, #a00000 90%);
+  box-shadow: 0 0 5vmin 1vmin rgba(255,30,30,.75), inset 0 0 1vmin rgba(0,0,0,.4); }
+
+#hint { font-size: 4vmin; color: var(--muted); margin-top: 5vmin; min-height: 1.3em; }
+
+/* お礼画面 */
+#thanks { display: none; background:
+  repeating-conic-gradient(#fff 0 25%, #111 0 50%) 0 0 / 16vmin 16vmin; animation: flag 1.2s linear infinite; }
+@keyframes flag { to { background-position: 16vmin 0; } }
+#thanks .card { background: rgba(10,10,12,.92); border-radius: 4vmin; padding: 7vmin 6vmin; box-shadow: 0 2vmin 8vmin #000; }
+#thanks h1 { margin: 0; font-size: 13vmin; font-style: italic; color: var(--accent); }
+#thanks p { margin: 3vmin 0 0; font-size: 7.5vmin; font-weight: 800; line-height: 1.35; }
+#thanks small { display: block; margin-top: 3vmin; font-size: 4.5vmin; color: var(--muted); font-weight: 600; }
+
+/* 詰まり */
+#jam { display: none; background: #3a2a00; }
+#jam p { font-size: 8vmin; font-weight: 800; margin: 0; }
+#jam small { font-size: 4.5vmin; color: #ffd98a; margin-top: 4vmin; display: block; }
+
+/* 開始（音とカメラの許可にタップが必要） */
+#start { background: var(--bg); z-index: 20; }
+#start button { font: inherit; font-size: 6vmin; font-weight: 800; padding: 4vmin 9vmin; border-radius: 3vmin; border: 0;
+  background: var(--accent); color: #fff; }
+#start p { color: var(--muted); font-size: 4vmin; max-width: 80vmin; line-height: 1.6; }
+#camerr { color: #ffb4a8; }
+
+/* ESP32 との接続状態（右下の小さな点。係員向け） */
+#conn { position: fixed; right: 10px; bottom: max(10px, env(safe-area-inset-bottom)); width: 10px; height: 10px;
+  border-radius: 50%; background: #555; z-index: 30; pointer-events: none; }
+#conn.ok { background: #2c6; } #conn.ng { background: #e33; }
+
+/* 隠しボタン（左上長押しで設定） */
+#corner { position: fixed; left: 0; top: 0; width: 80px; height: 80px; z-index: 25; }
+
+/* 設定画面 */
+#setup { display: none; position: fixed; inset: 0; z-index: 40; background: #111; overflow-y: auto;
+  -webkit-overflow-scrolling: touch; padding: max(12px, env(safe-area-inset-top)) 16px 32px; text-align: left;
+  -webkit-user-select: auto; user-select: auto; font-size: 15px; }
+#setup h2 { font-size: 18px; margin: 18px 0 8px; }
+#setup h2:first-child { margin-top: 4px; }
+#preview { width: 100%; max-width: 480px; display: block; background: #000; border-radius: 8px; touch-action: none; }
+#setup .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 8px 0; }
+#setup button { font: inherit; padding: 10px 14px; border-radius: 8px; border: 1px solid #444; background: #26262c; color: #fff; }
+#setup button.primary { background: var(--accent); border-color: var(--accent); }
+#setup input[type=range] { flex: 1; min-width: 140px; }
+#setup select { font: inherit; padding: 6px; border-radius: 6px; }
+#meter { height: 12px; background: #222; border-radius: 6px; overflow: hidden; position: relative; max-width: 480px; }
+#meterBar { height: 100%; width: 0; background: #3c9; }
+#meterTh { position: absolute; top: 0; bottom: 0; width: 2px; background: #f33; }
+#setup .note { color: var(--muted); font-size: 13px; line-height: 1.6; }
+#sales { font-size: 17px; line-height: 1.7; }
+</style>
+</head>
+<body>
+
+<div id="start" class="screen">
+  <p style="font-size:7vmin;color:var(--text);font-weight:800">F1スタート貯金箱</p>
+  <button id="startBtn">開始</button>
+  <p>タップすると音とカメラが使えるようになります。<br>カメラの許可を求められたら「許可」を選んでください。</p>
+  <p id="camerr"></p>
+</div>
+
+<div id="stage" class="screen">
+  <div id="price">キーホルダー <b>100</b> 円</div>
+  <div id="msg" class="pulse">コインを入れてスタート！</div>
+  <div id="lights"></div>
+  <div id="go">GO!</div>
+  <div id="hint">1枚ずつ入れてね</div>
+</div>
+
+<div id="thanks" class="screen">
+  <div class="card">
+    <h1>GOAL!</h1>
+    <p>ありがとう<br>ございます！</p>
+    <small>キーホルダーをお受け取りください</small>
+  </div>
+</div>
+
+<div id="jam" class="screen">
+  <p>コインがうまく<br>落ちませんでした</p>
+  <small>係員にお知らせください</small>
+</div>
+
+<div id="corner"></div>
+<div id="conn"></div>
+
+<div id="setup">
+  <h2>カメラ（受け皿を囲むようにドラッグ）</h2>
+  <canvas id="preview" width="320" height="240"></canvas>
+  <div class="row"><span>変化 <b id="ratio">0</b>%</span><span id="presentLbl">―</span></div>
+  <div id="meter"><div id="meterBar"></div><div id="meterTh"></div></div>
+  <div class="row"><span>しきい値</span><input id="th" type="range" min="2" max="50" step="1"><b id="thVal"></b>%</div>
+  <div class="row">
+    <button id="bgBtn" class="primary">背景を記録（受け皿が空のとき）</button>
+  </div>
+  <p class="note">受け皿が空の状態で「背景を記録」→ コインを置いて変化が赤線を超え、外すと下回ればOK。
+    超えにくいときはしきい値を下げる、囲む範囲を受け皿ぎりぎりに狭める。</p>
+
+  <h2>ゲート・テスト</h2>
+  <div class="row">
+    <button id="openBtn">ゲートを開ける</button>
+    <button id="testBtn">テスト投入（売上に数えない）</button>
+  </div>
+  <div class="row"><span>ESP32</span><b id="espState">―</b></div>
+  <div class="row"><span>アドレス</span><input id="espUrl" type="url" style="flex:1;min-width:180px;font:inherit;padding:6px;border-radius:6px"></div>
+  <p class="note">iPhone の Wi-Fi を「F1BANK」につなぐ。「つながらない」ときは、Safari で
+    <b>http://192.168.4.1/</b> を開き、証明書のインストールと信頼の設定を済ませる（最初の 1 回だけ）。
+    右下の小さな点が緑なら接続中、赤なら切れている。</p>
+
+  <h2>音量</h2>
+  <div class="row"><input id="vol" type="range" min="0" max="100" step="5"><b id="volVal"></b>%</div>
+
+  <h2>売上</h2>
+  <div id="sales"></div>
+  <div class="row"><button id="resetBtn">売上をリセット</button></div>
+
+  <div class="row" style="margin-top:24px"><button id="closeBtn" class="primary">閉じる</button></div>
+</div>
+
+<video id="cam" playsinline muted autoplay style="display:none"></video>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---------------- 設定 ----------------
+  const LAMPS = 5;
+  const LAMP_STEP_MS = 1000;       // F1 と同じ 1 秒間隔
+  const HOLD_MIN_MS = 700, HOLD_MAX_MS = 2500;  // 全灯後のランダム待ち
+  const ANNOUNCE_MS = 3100;        // sound/0001.mp3 の長さ
+  const DROP_TIMEOUT_MS = 3000;    // ゲートを開けてから受け皿が空になるまでの上限
+  const THANKS_MS = 7800;          // sound/0004.mp3 の長さ
+  const JAM_MS = 6600;             // sound/0005.mp3 の長さ
+  const OPEN_TIMEOUT_MS = 2500;    // ESP32 への指示の応答待ち
+  const PING_MS = 5000;            // 待機中に ESP32 の生存確認をする間隔
+  const PIX_DIFF = 28;             // 画素ごとの変化とみなす輝度差 (0-255)
+  const PRESENT_FRAMES = 4;        // 連続この回数「あり」で確定（誤検知防止）
+  const EMPTY_FRAMES = 4;
+  const CW = 96, CH = 72;          // 解析用の縮小サイズ
+
+  // ---------------- 保存 ----------------
+  const KEY = 'f1bank.v1';
+  const defaults = { roi: { x: 0.3, y: 0.3, w: 0.4, h: 0.4 }, th: 10, vol: 80, esp: 'https://192.168.4.1', sales: {} };
+  let cfg = load();
+  function load() {
+    try { return Object.assign({}, defaults, JSON.parse(localStorage.getItem(KEY) || '{}')); }
+    catch (e) { return JSON.parse(JSON.stringify(defaults)); }
+  }
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(cfg)); } catch (e) {} }
+  function today() {
+    const d = new Date();
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+
+  // ---------------- 要素 ----------------
+  const $ = id => document.getElementById(id);
+  const stage = $('stage'), thanks = $('thanks'), jam = $('jam'), msg = $('msg'), go = $('go'), hint = $('hint');
+  const lights = $('lights'), conn = $('conn'), video = $('cam');
+  const pods = [];
+  for (let i = 0; i < LAMPS; i++) {
+    const pod = document.createElement('div');
+    pod.className = 'pod';
+    pod.innerHTML = '<div class="lamp"></div><div class="lamp"></div>';
+    lights.appendChild(pod);
+    pods.push(pod);
+  }
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  function show(el) { [stage, thanks, jam].forEach(s => { s.style.display = s === el ? 'flex' : 'none'; }); }
+  function setLamps(n) { pods.forEach((p, i) => p.classList.toggle('on', i < n)); }
+
+  // ---------------- 音 ----------------
+  let ac = null, gain = null;
+  const buffers = {};
+  const FILES = { welcome: 'sound/0001.mp3', start: 'sound/0003.mp3', goal: 'sound/0004.mp3', jam: 'sound/0005.mp3' };
+  let current = null;
+  function initAudio() {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    ac = new AC();
+    gain = ac.createGain();
+    gain.gain.value = cfg.vol / 100;
+    gain.connect(ac.destination);
+    // iOS はタップ中に一度鳴らすと以後自由に鳴らせる
+    const b = ac.createBuffer(1, 1, 22050), s = ac.createBufferSource();
+    s.buffer = b; s.connect(gain); s.start(0);
+    Object.keys(FILES).forEach(k => {
+      fetch(FILES[k]).then(r => r.arrayBuffer()).then(ab => {
+        ac.decodeAudioData(ab, buf => { buffers[k] = buf; }, () => {});
+      }).catch(() => {});
+    });
+  }
+  function play(name) {
+    if (!ac || !buffers[name]) return;
+    if (current) { try { current.stop(); } catch (e) {} }
+    const s = ac.createBufferSource();
+    s.buffer = buffers[name]; s.connect(gain); s.start(0);
+    current = s;
+  }
+  function beep() {
+    if (!ac) return;
+    const o = ac.createOscillator(), g = ac.createGain(), t = ac.currentTime;
+    o.type = 'square'; o.frequency.value = 1000;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.25, t + 0.005);
+    g.gain.setValueAtTime(0.25, t + 0.16);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+    o.connect(g); g.connect(gain); o.start(t); o.stop(t + 0.2);
+  }
+
+  // ---------------- ESP32 への指示（Wi-Fi・HTTPS） ----------------
+  let espOk = null, espOpens = null;
+  function setConn(ok, opens) {
+    espOk = ok;
+    if (opens !== undefined) espOpens = opens;
+    conn.className = ok ? 'ok' : 'ng';
+    const el = $('espState');
+    if (el) el.textContent = ok ? '接続中（ゲートを開いた回数 ' + espOpens + '）' : 'つながらない';
+  }
+  function espGet(path) {
+    const ctl = window.AbortController ? new AbortController() : null;
+    const timer = setTimeout(() => { if (ctl) ctl.abort(); }, OPEN_TIMEOUT_MS);
+    return fetch(cfg.esp.replace(/\/$/, '') + path + (path.indexOf('?') < 0 ? '?' : '&') + 't=' + Date.now(),
+      { cache: 'no-store', signal: ctl ? ctl.signal : undefined })
+      .then(r => r.json())
+      .finally(() => clearTimeout(timer));
+  }
+  async function sendOpen() {
+    // 応答が返らなかったときだけ 1 回やり直す（開きっぱなしの二重要求は ESP32 側で無視）
+    for (let i = 0; i < 2; i++) {
+      try {
+        const j = await espGet('/open');
+        if (j.ok) { setConn(true, j.opens); return true; }
+      } catch (e) {}
+    }
+    setConn(false);
+    return false;
+  }
+  async function ping() {
+    try { const j = await espGet('/status'); setConn(!!j.ok, j.opens); }
+    catch (e) { setConn(false); }
+  }
+
+  // ---------------- カメラ検知 ----------------
+  const work = document.createElement('canvas');
+  work.width = CW; work.height = CH;
+  const wctx = work.getContext('2d', { willReadFrequently: true });
+  let bg = null;            // 背景（空の受け皿）
+  let ratio = 0;            // 変化した画素の割合 %
+  let present = false, hitRun = 0, missRun = 0;
+  let camOK = false;
+
+  function roiPx() {
+    const r = cfg.roi;
+    const x0 = Math.max(0, Math.floor(r.x * CW)), y0 = Math.max(0, Math.floor(r.y * CH));
+    const x1 = Math.min(CW, Math.ceil((r.x + r.w) * CW)), y1 = Math.min(CH, Math.ceil((r.y + r.h) * CH));
+    return { x0, y0, x1, y1 };
+  }
+  function grab() {
+    wctx.drawImage(video, 0, 0, CW, CH);
+    const { x0, y0, x1, y1 } = roiPx();
+    const w = x1 - x0, h = y1 - y0;
+    if (w < 2 || h < 2) return null;
+    const d = wctx.getImageData(x0, y0, w, h).data;
+    const g = new Float32Array(w * h);
+    for (let i = 0, j = 0; j < g.length; i += 4, j++) g[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    return g;
+  }
+  function learnBackground() { bg = grab(); present = false; hitRun = missRun = 0; }
+
+  function analyze() {
+    if (!camOK || video.readyState < 2) return;
+    const g = grab();
+    if (!g) return;
+    if (!bg || bg.length !== g.length) { bg = g; return; }
+    let n = 0;
+    for (let i = 0; i < g.length; i++) if (Math.abs(g[i] - bg[i]) > PIX_DIFF) n++;
+    ratio = 100 * n / g.length;
+    const hit = ratio > cfg.th;
+    if (hit) { hitRun++; missRun = 0; } else { missRun++; hitRun = 0; }
+    if (!present && hitRun >= PRESENT_FRAMES) present = true;
+    if (present && missRun >= EMPTY_FRAMES) present = false;
+    // 空のあいだは照明のゆっくりした変化に背景を追従させる
+    if (!present && !hit) for (let i = 0; i < g.length; i++) bg[i] += (g[i] - bg[i]) * 0.02;
+  }
+
+  async function startCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('このページではカメラが使えません（HTTPS で開いてください）');
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false, video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
+    });
+    video.srcObject = stream;
+    await video.play();
+    camOK = true;
+    setTimeout(learnBackground, 800);
+  }
+
+  // ---------------- 本体 ----------------
+  let busy = false, setupOpen = false;
+
+  function addSale() {
+    const k = today();
+    cfg.sales[k] = (cfg.sales[k] || 0) + 1;
+    save();
+  }
+  function idle() {
+    show(stage);
+    setLamps(0);
+    go.style.display = 'none';
+    lights.style.display = 'flex';
+    msg.textContent = 'コインを入れてスタート！';
+    msg.className = 'pulse';
+    hint.textContent = camOK ? '1枚ずつ入れてね' : 'カメラ未接続（t キーでテスト）';
+  }
+
+  async function waitUntil(fn, timeout) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeout) { if (fn()) return true; await sleep(50); }
+    return fn();
+  }
+
+  async function race(isTest) {
+    busy = true;
+    if (!isTest) addSale();
+    msg.textContent = 'まもなくスタート';
+    msg.className = '';
+    hint.textContent = '';
+    play('welcome');
+    await sleep(ANNOUNCE_MS);
+
+    for (let i = 1; i <= LAMPS; i++) {
+      setLamps(i); beep();
+      await sleep(LAMP_STEP_MS);
+    }
+    await sleep(HOLD_MIN_MS + Math.random() * (HOLD_MAX_MS - HOLD_MIN_MS));
+
+    // 消灯 = スタート
+    setLamps(0);
+    msg.textContent = '';
+    lights.style.display = 'none';
+    go.style.display = 'block';
+    play('start');
+    await sendOpen();
+
+    const dropped = isTest || !camOK || await waitUntil(() => !present, DROP_TIMEOUT_MS);
+    await sleep(600);
+    if (dropped) {
+      show(thanks); play('goal');
+      await sleep(THANKS_MS);
+    } else {
+      show(jam); play('jam');
+      await sleep(JAM_MS);
+      // 係員がゲートを開けるなどして空になるまで次を始めない
+      while (present) await sleep(200);
+    }
+    idle();
+    busy = false;
+  }
+
+  function tick() {
+    analyze();
+    if (!busy && !setupOpen && present) race(false);
+    if (setupOpen) drawPreview();
+  }
+
+  // ---------------- 設定画面 ----------------
+  const preview = $('preview'), pctx = preview.getContext('2d');
+  function drawPreview() {
+    if (camOK && video.readyState >= 2) {
+      pctx.drawImage(video, 0, 0, preview.width, preview.height);
+    } else {
+      pctx.fillStyle = '#000'; pctx.fillRect(0, 0, preview.width, preview.height);
+      pctx.fillStyle = '#888'; pctx.font = '16px sans-serif'; pctx.fillText('カメラなし', 12, 24);
+    }
+    const r = cfg.roi;
+    pctx.strokeStyle = present ? '#f33' : '#3c9'; pctx.lineWidth = 3;
+    pctx.strokeRect(r.x * preview.width, r.y * preview.height, r.w * preview.width, r.h * preview.height);
+    $('ratio').textContent = ratio.toFixed(1);
+    $('presentLbl').textContent = present ? 'コインあり' : '空';
+    $('meterBar').style.width = Math.min(100, ratio * 2) + '%';
+    $('meterBar').style.background = ratio > cfg.th ? '#f33' : '#3c9';
+    $('meterTh').style.left = Math.min(100, cfg.th * 2) + '%';
+  }
+  function renderSales() {
+    const days = Object.keys(cfg.sales).sort();
+    let total = 0;
+    const lines = days.map(d => { total += cfg.sales[d]; return d + '： ' + cfg.sales[d] + ' 枚（' + (cfg.sales[d] * 100).toLocaleString() + ' 円）'; });
+    $('sales').innerHTML = (lines.length ? lines.join('<br>') : 'まだありません') +
+      '<br><b>合計 ' + total + ' 枚（' + (total * 100).toLocaleString() + ' 円）</b>';
+  }
+  function openSetup() {
+    setupOpen = true;
+    document.body.classList.add('setup-open');
+    $('setup').style.display = 'block';
+    $('th').value = cfg.th; $('thVal').textContent = cfg.th;
+    $('vol').value = cfg.vol; $('volVal').textContent = cfg.vol;
+    renderSales();
+    ping();
+  }
+  function closeSetup() {
+    setupOpen = false;
+    document.body.classList.remove('setup-open');
+    $('setup').style.display = 'none';
+    save();
+  }
+
+  // ROI をドラッグで指定
+  let drag = null;
+  function pos(e) {
+    const r = preview.getBoundingClientRect(), p = e.touches ? e.touches[0] : e;
+    return { x: Math.min(1, Math.max(0, (p.clientX - r.left) / r.width)), y: Math.min(1, Math.max(0, (p.clientY - r.top) / r.height)) };
+  }
+  function dStart(e) { e.preventDefault(); drag = pos(e); }
+  function dMove(e) {
+    if (!drag) return; e.preventDefault();
+    const p = pos(e);
+    cfg.roi = { x: Math.min(drag.x, p.x), y: Math.min(drag.y, p.y), w: Math.abs(p.x - drag.x), h: Math.abs(p.y - drag.y) };
+  }
+  function dEnd() {
+    if (!drag) return; drag = null;
+    if (cfg.roi.w < 0.05 || cfg.roi.h < 0.05) cfg.roi = defaults.roi;
+    save(); learnBackground();
+  }
+  preview.addEventListener('touchstart', dStart, { passive: false });
+  preview.addEventListener('touchmove', dMove, { passive: false });
+  preview.addEventListener('touchend', dEnd);
+  preview.addEventListener('mousedown', dStart);
+  window.addEventListener('mousemove', dMove);
+  window.addEventListener('mouseup', dEnd);
+
+  $('th').addEventListener('input', e => { cfg.th = +e.target.value; $('thVal').textContent = cfg.th; save(); });
+  $('vol').addEventListener('input', e => {
+    cfg.vol = +e.target.value; $('volVal').textContent = cfg.vol;
+    if (gain) gain.gain.value = cfg.vol / 100; save();
+  });
+  $('bgBtn').addEventListener('click', learnBackground);
+  $('openBtn').addEventListener('click', () => { sendOpen(); });
+  $('testBtn').addEventListener('click', () => { if (!busy) { closeSetup(); race(true); } });
+  $('resetBtn').addEventListener('click', () => {
+    if (confirm('売上の記録をすべて消しますか？')) { cfg.sales = {}; save(); renderSales(); }
+  });
+  $('closeBtn').addEventListener('click', closeSetup);
+
+  const espUrl = $('espUrl');
+  espUrl.value = cfg.esp;
+  espUrl.addEventListener('change', () => { cfg.esp = espUrl.value.trim() || defaults.esp; save(); ping(); });
+
+  // 左上を 2 秒長押しで設定を開く（お客さんが触っても開かないように）
+  let pressT = null;
+  const corner = $('corner');
+  const pressStart = e => { e.preventDefault(); pressT = setTimeout(openSetup, 2000); };
+  const pressEnd = () => clearTimeout(pressT);
+  corner.addEventListener('touchstart', pressStart, { passive: false });
+  corner.addEventListener('touchend', pressEnd);
+  corner.addEventListener('mousedown', pressStart);
+  corner.addEventListener('mouseup', pressEnd);
+
+  // PC での動作確認用
+  window.addEventListener('keydown', e => {
+    if (e.key === 't' && !busy && !setupOpen) race(true);
+    if (e.key === 's') setupOpen ? closeSetup() : openSetup();
+  });
+
+  // ---------------- 開始 ----------------
+  let tries = 0;
+  $('startBtn').addEventListener('click', async () => {
+    if (tries++ === 0) {
+      initAudio();
+      try { await startCamera(); }
+      catch (err) {
+        // 失敗したら理由を見せて止まる。もう一度押すとカメラなしで続行（テスト用）
+        $('camerr').textContent = 'カメラを使えません: ' + (err.message || err.name);
+        $('startBtn').textContent = 'カメラなしで続ける';
+        return;
+      }
+    }
+    $('start').style.display = 'none';
+    idle();
+    setInterval(tick, 66);   // 約 15 fps
+    ping();
+    setInterval(() => { if (!busy) ping(); }, PING_MS);
+  });
+  idle();
+
+  // オフライン（ESP32 の Wi-Fi 接続中）でも開けるようにキャッシュする
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+})();
+</script>
+</body>
+</html>
