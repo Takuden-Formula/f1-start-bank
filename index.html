@@ -12,9 +12,10 @@
 <!--
   F1スタート貯金箱（iPhone 6s 版・横画面）— 紅陵祭2026 電気自動車同好会
 
-  流れ: START → 100円玉を入れる → 背面カメラが受け皿のコインを検知
-        → ESP32 へ https://192.168.4.1/open（SG90 がゲートを開けてコインを回収室へ）
-        → 受け皿が空になったのを確認 → F1 スタートシグナル → GO → ゴール（お礼）
+  流れ: START → 100円玉を入れる → 背面カメラが受け皿のコインを検知 → F1 スタートシグナル
+        → 一斉消灯（GO）と同時に ESP32 へ https://192.168.4.1/open?ms=…（SG90 がゲートを開け、
+          指定時間後に ESP32 が自動で閉じる）→ GO から設定の秒数でゴール（お礼）
+        ゲートが閉じるまでに受け皿が空にならなければ詰まりの画面。
   iPhone は ESP32 が出す Wi-Fi「F1BANK」につなぐ（インターネット不要）。
   オフラインでも開けるよう sw.js で自身をキャッシュする。
   カメラは HTTPS か localhost でしか使えない（iOS Safari の制約）。
@@ -109,7 +110,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 #go .word { font-size: 44vh; line-height: .8; letter-spacing: .02em; margin-top: 5vh; }
 #go .line { width: 70vw; height: 3px; background: var(--line); margin-top: 5vh; overflow: hidden; }
 #go .line i { display: block; height: 100%; width: 0; background: var(--red); }
-#go.run .line i { width: 100%; transition: width 2.4s cubic-bezier(.55, 0, .75, .4); }
+#go.run .line i { width: 100%; }
 
 /* ================= ゴール ================= */
 #thanks { flex-direction: column; justify-content: center; padding: 0 var(--pad-x); }
@@ -344,6 +345,13 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
       </section>
 
       <section class="panel">
+        <h3>タイミング</h3>
+        <div class="row" style="margin-top:0"><span style="min-width:9.5em">GO → お礼の表示</span><input id="goSec" type="range" min="3" max="20" step="0.5"><span class="val" id="goSecVal"></span></div>
+        <div class="row"><span style="min-width:9.5em">ゲートを開けておく</span><input id="gateSec" type="range" min="1" max="15" step="0.5"><span class="val" id="gateSecVal"></span></div>
+        <p class="note">GO と同時にゲートが開き、指定の秒数で閉じます。閉じるまでにコインが落ちなければ詰まりの画面になります。</p>
+      </section>
+
+      <section class="panel">
         <h3>音量</h3>
         <div class="row" style="margin-top:0"><input id="vol" type="range" min="0" max="100" step="5"><span class="val" id="volVal"></span></div>
       </section>
@@ -368,7 +376,6 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
   const LAMP_STEP_MS = 1000;                    // F1 と同じ 1 秒間隔
   const HOLD_MIN_MS = 700, HOLD_MAX_MS = 2500;  // 全灯後のランダム待ち
   const ANNOUNCE_MS = 3100;                     // sound/0001.mp3 の長さ
-  const GO_MS = 2600;
   const THANKS_MS = 7800;                       // sound/0004.mp3 の長さ
   const WAIT_COIN_MS = 30000;                   // START 後、コインを待つ時間
   const DROP_TIMEOUT_MS = 3000;                 // ゲートを開けてから受け皿が空になるまでの上限
@@ -387,7 +394,7 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
 
   // ================= 保存 =================
   const KEY = 'f1bank.v1';
-  const defaults = { roi: { x: 0.3, y: 0.3, w: 0.4, h: 0.4 }, th: 8, coin: null, vol: 80,
+  const defaults = { roi: { x: 0.3, y: 0.3, w: 0.4, h: 0.4 }, th: 8, coin: null, vol: 80, goSec: 7, gateSec: 5,
     esp: 'https://192.168.4.1', sales: {} };
   let cfg = load();
   function load() {
@@ -496,11 +503,12 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
     try { const j = await espGet(path); setConn(true, j.us !== undefined ? j : null); return j; }
     catch (e) { setConn(false); return null; }
   }
-  async function sendOpen() {
-    // 応答が返らなかったときだけ 1 回やり直す（開いている最中の二重要求は ESP32 側で無視）
+  async function sendOpen(ms) {
+    // ms だけ開けて ESP32 が自動で閉じる。応答が返らなかったときだけ 1 回やり直す
+    // （開いている最中の二重要求は ESP32 側で無視）
     for (let i = 0; i < 2; i++) {
       try {
-        const j = await espGet('/open');
+        const j = await espGet('/open?ms=' + Math.round(ms));
         if (j.ok) { setConn(true, { opens: j.opens }); return true; }
       } catch (e) {}
     }
@@ -673,21 +681,14 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
           await pause(100, gen);
         }
         $('prog').style.width = '0';
-        // ---- コインを検知 → ゲートを開ける ----
+        // ---- コインを検知 ----
         state = 'check';
         addSale();
         coinSound();
-        setMain(2, 'コインを確認しました', 'ゲートを開けています', null);
-        await pause(500, gen);
-        const sent = await sendOpen();
-        guard(gen);
-        const dropped = sent && await waitUntil(() => !coinHere(), DROP_TIMEOUT_MS, gen);
-        if (!dropped) {
-          state = 'jam';
-          if (await jamLoop(gen) === 'reset') { idle(); return; }
-        }
+        setMain(2, 'コインを確認しました', '', null);
+        await pause(800, gen);
       }
-      // ---- スタート ----
+      // ---- カウントダウン（スタートシグナル） ----
       state = 'race';
       show(stage);
       setMain(3, 'まもなくスタートです', 'シグナルが消えたらスタート', null);
@@ -695,14 +696,29 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
       await pause(ANNOUNCE_MS, gen);
       for (let i = 1; i <= LAMPS; i++) { setLamps(i); beep(); await pause(LAMP_STEP_MS, gen); }
       await pause(HOLD_MIN_MS + Math.random() * (HOLD_MAX_MS - HOLD_MIN_MS), gen);
-      // ---- 一斉消灯 = GO ----
+      // ---- 一斉消灯 = GO と同時にゲートを開ける（閉じるのは ESP32 が gateMs 後に自動で） ----
       setLamps(0);
+      const goMs = cfg.goSec * 1000, gateMs = cfg.gateSec * 1000;
+      const line = goScr.querySelector('.line i');
+      line.style.transition = 'none';
       goScr.classList.remove('run');
       show(goScr);
-      void goScr.offsetWidth;   // アニメーションを最初からやり直す
+      void goScr.offsetWidth;   // 線を 0 に戻してから、GO→ゴールの秒数で伸ばす
+      line.style.transition = 'width ' + goMs + 'ms linear';
       goScr.classList.add('run');
-      await pause(GO_MS, gen);
-      // ---- ゴール ----
+      const tGo = Date.now();
+      if (!isTest) {
+        const sent = await sendOpen(gateMs);
+        guard(gen);
+        // ゲートが閉じるまでにコインが落ちなければ詰まり
+        const dropped = sent && await waitUntil(() => !coinHere(), gateMs + 300, gen);
+        if (!dropped) {
+          state = 'jam';
+          if (await jamLoop(gen) === 'reset') { idle(); return; }
+        }
+      }
+      // ---- GO から goSec 秒でゴール ----
+      await pause(Math.max(0, goMs - (Date.now() - tGo)), gen);
       show(thanks);
       play('goal');
       await pause(THANKS_MS, gen);
@@ -725,7 +741,7 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
       if (jamAction === 'open') {
         jamAction = null;
         $('jamStatus').textContent = 'ゲートを開けています…';
-        const sent = await sendOpen();
+        const sent = await sendOpen(cfg.gateSec * 1000);
         guard(gen);
         if (sent && await waitUntil(() => !coinHere(), DROP_TIMEOUT_MS, gen)) return 'dropped';
         $('jamStatus').textContent = sent ? 'まだコインが残っています' : 'ESP32 につながりません';
@@ -844,6 +860,8 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
     $('setup').style.display = 'block';
     $('th').value = cfg.th; $('thVal').textContent = cfg.th + ' %';
     $('vol').value = cfg.vol; $('volVal').textContent = cfg.vol + ' %';
+    $('goSec').value = cfg.goSec; $('goSecVal').textContent = cfg.goSec + ' 秒';
+    $('gateSec').value = cfg.gateSec; $('gateSecVal').textContent = cfg.gateSec + ' 秒';
     $('espUrl').value = cfg.esp;
     fitPreview();
     renderSales();
@@ -896,6 +914,9 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
     cfg.vol = +e.target.value; $('volVal').textContent = cfg.vol + ' %';
     if (gain) gain.gain.value = cfg.vol / 100; save();
   });
+  ['goSec', 'gateSec'].forEach(k => $(k).addEventListener('input', e => {
+    cfg[k] = +e.target.value; $(k + 'Val').textContent = cfg[k] + ' 秒'; save();
+  }));
   $('espUrl').addEventListener('change', e => { cfg.esp = e.target.value.trim() || defaults.esp; save(); ping(); });
 
   // ---- SG90 の手動操作 ----
