@@ -354,6 +354,8 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
       <section class="panel">
         <h3>音量</h3>
         <div class="row" style="margin-top:0"><input id="vol" type="range" min="0" max="100" step="5"><span class="val" id="volVal"></span></div>
+        <div class="row"><button class="sb" id="soundTest">音のテスト</button><span id="audioState" style="color:var(--muted);font-size:12.5px"></span></div>
+        <p class="note">鳴らないときは、iPhone 本体の音量ボタンで音量を上げてください。</p>
       </section>
 
       <section class="panel">
@@ -441,6 +443,11 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
   let ac = null, gain = null, current = null;
   const buffers = {};
   const FILES = { welcome: 'sound/0001.mp3', goal: 'sound/0004.mp3', jam: 'sound/0005.mp3' };
+  // iOS では Web Audio の音は本体の消音スイッチ（マナーモード）で消える。
+  // <audio> で無音を流し続けておくと「再生用」のオーディオセッションになり、スイッチに関係なく鳴る
+  const keepAlive = new Audio('sound/silent.wav');
+  keepAlive.loop = true;
+  keepAlive.setAttribute('playsinline', '');
   function initAudio() {
     if (ac) return;
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -448,14 +455,32 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
     gain = ac.createGain();
     gain.gain.value = cfg.vol / 100;
     gain.connect(ac.destination);
-    // iOS はタップ中に一度鳴らすと以後自由に鳴らせる
-    const b = ac.createBuffer(1, 1, 22050), s = ac.createBufferSource();
-    s.buffer = b; s.connect(gain); s.start(0);
     Object.keys(FILES).forEach(k => {
       fetch(FILES[k]).then(r => r.arrayBuffer()).then(ab => {
         ac.decodeAudioData(ab, buf => { buffers[k] = buf; }, () => {});
       }).catch(() => {});
     });
+  }
+  // タップのたびに呼ぶ。iOS は画面ロックや別アプリへの切り替えで音を止める（suspended / interrupted）
+  // ので、止まっていたら再開する。再開できるのはタップの最中だけ
+  function unlockAudio() {
+    initAudio();
+    if (ac.state !== 'running') ac.resume().catch(() => {});
+    if (keepAlive.paused) keepAlive.play().catch(() => {});
+    // iOS はタップ中に一度鳴らすと以後自由に鳴らせる
+    const s = ac.createBufferSource();
+    s.buffer = ac.createBuffer(1, 1, 22050); s.connect(gain); s.start(0);
+  }
+  document.addEventListener('touchend', () => { if (started) unlockAudio(); }, { passive: true });
+  document.addEventListener('click', () => { if (started) unlockAudio(); });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && ac && ac.state !== 'running') ac.resume().catch(() => {});
+  });
+  function audioState() {
+    if (!ac) return '未初期化';
+    const n = Object.keys(buffers).length, all = Object.keys(FILES).length;
+    const st = { running: '再生可', suspended: '停止中（画面をタップ）', interrupted: '中断中（画面をタップ）', closed: '終了' }[ac.state] || ac.state;
+    return st + '・音声ファイル ' + n + '/' + all;
   }
   function stopSound() { if (current) { try { current.stop(); } catch (e) {} current = null; } }
   function play(name) {
@@ -957,6 +982,14 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
   $('startBtn').addEventListener('click', () => { if (state === 'idle') { pressSound(); run(false); } });
   $('cancelBtn').addEventListener('click', () => { cancelReq = true; });
 
+  // 音のテスト（設定画面）
+  $('soundTest').addEventListener('click', () => {
+    unlockAudio();
+    beep();
+    setTimeout(() => play('welcome'), 300);
+  });
+  setInterval(() => { if (setupOpen) $('audioState').textContent = audioState(); }, 500);
+
   // PC での確認用
   window.addEventListener('keydown', e => {
     if (e.key === 't' && state === 'idle' && !setupOpen) run(true);
@@ -970,7 +1003,7 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
     if (started) return;
     started = true;
     document.body.classList.add('booted');
-    initAudio();
+    unlockAudio();   // タップの最中に呼ぶ必要がある（await より前）
     try { await startCamera(); }
     catch (err) { camErr = err.message || err.name; }
     setInterval(tick, 66);   // 約 15 fps

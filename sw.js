@@ -1,9 +1,9 @@
 // F1スタート貯金箱: オフライン用キャッシュ
 // iPhone が ESP32 の Wi-Fi（インターネットなし）につながっていてもアプリを開けるようにする。
 // ネットにつながっているときは裏で最新版を取りに行き、次回起動時に反映される。
-const CACHE = 'f1bank-v6';
+const CACHE = 'f1bank-v7';
 const FILES = ['./', 'index.html', 'icon.png',
-  'sound/0001.mp3', 'sound/0004.mp3', 'sound/0005.mp3'];
+  'sound/0001.mp3', 'sound/0004.mp3', 'sound/0005.mp3', 'sound/silent.wav'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
