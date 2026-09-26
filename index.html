@@ -9,16 +9,17 @@
 <link rel="apple-touch-icon" href="icon.png">
 <title>F1スタート貯金箱</title>
 <!--
-  F1スタート貯金箱（iPhone 6s 版）— 紅陵祭2026 電気自動車同好会
+  F1スタート貯金箱（iPhone 6s 版・横画面）— 紅陵祭2026 電気自動車同好会
 
-  iPhone の背面カメラで箱の中の受け皿を見張り、コインが載ったら
-  画面で F1 スタートシグナル → 一斉消灯の瞬間に ESP32 へ https://192.168.4.1/open を送る
-  → ESP32 がサーボのゲートを開ける → 受け皿が空になったらお礼。
+  流れ: お客さんが START を押す → 100円玉を入れる → 背面カメラが受け皿のコインを検知
+        → ESP32 へ https://192.168.4.1/open（SG90 がゲートを開けてコインを回収室へ）
+        → 受け皿が空になったのを確認 → F1 スタートシグナル → GO! → ゴール（お礼）
   iPhone は ESP32 が出す Wi-Fi「F1BANK」につなぐ（インターネット不要）。
   オフラインでも開けるよう sw.js で自身をキャッシュする。
-
   カメラは HTTPS か localhost でしか使えない（iOS Safari の制約）。
-  設定画面: 左上の角を 2 秒長押し。PC で試すときは t キーでテスト投入。
+
+  設定画面: 起動画面の「設定・カメラ確認」、または待機中に左上の角を 2 秒長押し。
+  PC での確認用キー: t=テスト走行 / c=コインあり・なしを切り替え（カメラなしのとき） / s=設定
 -->
 <style>
 :root {
@@ -29,117 +30,166 @@
   --text: #f4f4f4;
   --muted: #9a9aa3;
   --accent: #e10600;
+  --ok: #2c6;
+  --lamp: min(15vh, 8vw);   /* 横画面基準のランプの大きさ */
 }
+@media (orientation: portrait) { :root { --lamp: min(12vw, 8vh); } }
+
 * { box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden;
   font-family: -apple-system, "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif; }
+button { font: inherit; }
 .screen { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
-  padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom)); text-align: center; }
+  padding: max(10px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+           max(10px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); text-align: center; }
 
-/* 待機・スタート画面 */
-#price { font-size: 6vmin; color: var(--muted); letter-spacing: .1em; }
-#price b { color: var(--text); font-size: 10vmin; }
-#msg { font-size: 8vmin; font-weight: 800; min-height: 1.4em; margin: 4vmin 0; }
+/* ---------- メイン画面 ---------- */
+#price { font-size: 5.5vh; color: var(--muted); letter-spacing: .08em; }
+#price b { color: var(--text); font-size: 8vh; }
+#lights { display: flex; gap: calc(var(--lamp) * .16); padding: calc(var(--lamp) * .22); margin: 3vh 0;
+  background: var(--panel); border-radius: calc(var(--lamp) * .25);
+  box-shadow: inset 0 0 0 3px #000, 0 2vh 5vh rgba(0,0,0,.6); }
+.pod { display: flex; flex-direction: column; gap: calc(var(--lamp) * .16); padding: calc(var(--lamp) * .14);
+  background: #050506; border-radius: calc(var(--lamp) * .18); }
+.lamp { width: var(--lamp); height: var(--lamp); border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #3a1010, var(--lamp-off) 70%); box-shadow: inset 0 0 8px #000; }
+.pod.on .lamp { background: radial-gradient(circle at 35% 30%, #ffd0d0, var(--lamp-on) 45%, #a00000 90%);
+  box-shadow: 0 0 calc(var(--lamp) * .4) 4px rgba(255,30,30,.75), inset 0 0 6px rgba(0,0,0,.4); }
+
+#bottom { display: flex; align-items: center; justify-content: center; gap: 5vw; min-height: 17vh; }
+#msg { font-size: 7vh; font-weight: 800; }
 #msg.pulse { animation: pulse 1.6s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .35; } }
-#go { font-size: 22vmin; font-weight: 900; font-style: italic; color: #fff; display: none; letter-spacing: .05em; }
+#sub { font-size: 4.2vh; color: var(--muted); min-height: 1.3em; margin-top: 1vh; }
 
-#lights { display: flex; gap: 2.2vmin; padding: 3vmin; background: var(--panel); border-radius: 3vmin;
-  box-shadow: inset 0 0 0 .6vmin #000, 0 2vmin 5vmin rgba(0,0,0,.6); }
-.pod { display: flex; flex-direction: column; gap: 2.2vmin; padding: 2vmin; background: #050506; border-radius: 2.2vmin; }
-.lamp { width: 12vmin; height: 12vmin; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #3a1010, var(--lamp-off) 70%);
-  box-shadow: inset 0 0 1.2vmin #000; transition: background .04s, box-shadow .04s; }
-.pod.on .lamp { background: radial-gradient(circle at 35% 30%, #ffd0d0, var(--lamp-on) 45%, #a00000 90%);
-  box-shadow: 0 0 5vmin 1vmin rgba(255,30,30,.75), inset 0 0 1vmin rgba(0,0,0,.4); }
+#startBtn { font-size: 8vh; font-weight: 900; font-style: italic; letter-spacing: .06em; color: #fff;
+  padding: 2.2vh 7vh; border-radius: 99px; border: 0.8vh solid #fff; background: var(--accent);
+  box-shadow: 0 0 0 0 rgba(225,6,0,.7); animation: ring 1.8s ease-out infinite; }
+#startBtn:active { transform: scale(.96); }
+@keyframes ring { 0% { box-shadow: 0 0 0 0 rgba(225,6,0,.7); } 100% { box-shadow: 0 0 0 4vh rgba(225,6,0,0); } }
+#cancelBtn { font-size: 4vh; color: var(--muted); background: none; border: 2px solid #444; border-radius: 99px; padding: 1.4vh 4vh; }
 
-#hint { font-size: 4vmin; color: var(--muted); margin-top: 5vmin; min-height: 1.3em; }
+#go { position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; background: var(--bg); }
+#go b { font-size: 30vh; font-weight: 900; font-style: italic; }
+#track { position: relative; width: 80vw; height: 3px; background: repeating-linear-gradient(90deg, #666 0 16px, transparent 16px 28px); margin-top: 4vh; }
+#car { position: absolute; left: 0; top: -13vh; font-size: 16vh; line-height: 1; transform: translateX(-50%) scaleX(-1); }
+#car.run { left: 100%; transition: left 2.2s cubic-bezier(.5, 0, .9, .6); }
 
-/* お礼画面 */
-#thanks { display: none; background:
-  repeating-conic-gradient(#fff 0 25%, #111 0 50%) 0 0 / 16vmin 16vmin; animation: flag 1.2s linear infinite; }
-@keyframes flag { to { background-position: 16vmin 0; } }
-#thanks .card { background: rgba(10,10,12,.92); border-radius: 4vmin; padding: 7vmin 6vmin; box-shadow: 0 2vmin 8vmin #000; }
-#thanks h1 { margin: 0; font-size: 13vmin; font-style: italic; color: var(--accent); }
-#thanks p { margin: 3vmin 0 0; font-size: 7.5vmin; font-weight: 800; line-height: 1.35; }
-#thanks small { display: block; margin-top: 3vmin; font-size: 4.5vmin; color: var(--muted); font-weight: 600; }
+/* ---------- お礼 ---------- */
+#thanks { display: none; background: repeating-conic-gradient(#fff 0 25%, #111 0 50%) 0 0 / 14vh 14vh; animation: flag 1.2s linear infinite; }
+@keyframes flag { to { background-position: 14vh 0; } }
+#thanks .card { background: rgba(10,10,12,.92); border-radius: 4vh; padding: 5vh 9vh; box-shadow: 0 2vh 8vh #000; }
+#thanks h1 { margin: 0; font-size: 14vh; font-style: italic; color: var(--accent); line-height: 1.1; }
+#thanks p { margin: 2vh 0 0; font-size: 9vh; font-weight: 800; }
+#thanks small { display: block; margin-top: 2vh; font-size: 5vh; color: var(--muted); font-weight: 600; }
 
-/* 詰まり */
-#jam { display: none; background: #3a2a00; }
-#jam p { font-size: 8vmin; font-weight: 800; margin: 0; }
-#jam small { font-size: 4.5vmin; color: #ffd98a; margin-top: 4vmin; display: block; }
-#jamStatus { font-size: 4.5vmin; color: #fff; min-height: 1.4em; margin-top: 5vmin; }
-#jamStaff { margin-top: 6vmin; display: flex; flex-direction: column; gap: 3vmin; width: min(80vmin, 340px); }
-#jamStaff .cap { font-size: 3.6vmin; color: #caa85a; }
-/* 係員用ボタン: 長押しで実行（子どもが触っても押し間違えないように） */
-.hold { position: relative; overflow: hidden; font: inherit; font-size: 4.6vmin; font-weight: 700; color: #fff;
-  padding: 3.6vmin 4vmin; border-radius: 2.5vmin; border: 2px solid #caa85a; background: rgba(0,0,0,.35); touch-action: none; }
+/* ---------- コイン詰まり ---------- */
+#jam { display: none; background: #3a2a00; flex-direction: row; gap: 6vw; }
+#jam .l p { font-size: 8vh; font-weight: 800; margin: 0; }
+#jam .l small { font-size: 5vh; color: #ffd98a; margin-top: 3vh; display: block; }
+#jamStatus { font-size: 4.5vh; color: #fff; min-height: 1.4em; margin-top: 3vh; }
+#jamStaff { display: flex; flex-direction: column; gap: 3vh; width: min(40vw, 340px); }
+#jamStaff .cap { font-size: 3.8vh; color: #caa85a; }
+.hold { position: relative; overflow: hidden; font-size: 4.8vh; font-weight: 700; color: #fff; padding: 3.2vh 3vh;
+  border-radius: 2.5vh; border: 2px solid #caa85a; background: rgba(0,0,0,.35); touch-action: none; }
 .hold i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: rgba(202,168,90,.45); }
 .hold span { position: relative; }
 .hold.busy { opacity: .5; pointer-events: none; }
 
-/* 開始（音とカメラの許可にタップが必要） */
+/* ---------- 起動画面 ---------- */
 #start { background: var(--bg); z-index: 20; }
-#start button { font: inherit; font-size: 6vmin; font-weight: 800; padding: 4vmin 9vmin; border-radius: 3vmin; border: 0;
-  background: var(--accent); color: #fff; }
-#start p { color: var(--muted); font-size: 4vmin; max-width: 80vmin; line-height: 1.6; }
+#start h1 { font-size: 8vh; margin: 0 0 5vh; }
+#start .btns { display: flex; gap: 4vw; }
+#start button { font-size: 5.5vh; font-weight: 800; padding: 3vh 6vh; border-radius: 2.5vh; border: 0; color: #fff; }
+#start .go { background: var(--accent); }
+#start .cfg { background: #2a2a31; }
+#start p { color: var(--muted); font-size: 3.8vh; line-height: 1.6; margin: 4vh 0 0; }
 #camerr { color: #ffb4a8; }
 
-/* ESP32 との接続状態（右下の小さな点。係員向け） */
-#conn { position: fixed; right: 10px; bottom: max(10px, env(safe-area-inset-bottom)); width: 10px; height: 10px;
-  border-radius: 50%; background: #555; z-index: 30; pointer-events: none; }
-#conn.ok { background: #2c6; } #conn.ng { background: #e33; }
+/* 横向きにしてもらう案内（iPhone を縦に持ったとき） */
+#rotate { display: none; position: fixed; inset: 0; z-index: 60; background: #000; color: #fff;
+  flex-direction: column; align-items: center; justify-content: center; font-size: 6vw; font-weight: 700; gap: 4vw; }
+#rotate span { font-size: 18vw; }
+@media (orientation: portrait) and (pointer: coarse) { #rotate { display: flex; } }
+body.setup-open #rotate { display: none; }
 
-/* 隠しボタン（左上長押しで設定） */
+/* ESP32 との接続状態（右下の小さな点。係員向け） */
+#conn { position: fixed; right: max(10px, env(safe-area-inset-right)); bottom: max(8px, env(safe-area-inset-bottom));
+  width: 10px; height: 10px; border-radius: 50%; background: #555; z-index: 30; pointer-events: none; }
+#conn.ok { background: var(--ok); } #conn.ng { background: #e33; }
 #corner { position: fixed; left: 0; top: 0; width: 80px; height: 80px; z-index: 25; }
 
-/* 設定画面 */
+/* ---------- 設定画面 ---------- */
 #setup { display: none; position: fixed; inset: 0; z-index: 40; background: #111; overflow-y: auto;
-  -webkit-overflow-scrolling: touch; padding: max(12px, env(safe-area-inset-top)) 16px 32px; text-align: left;
-  -webkit-user-select: auto; user-select: auto; font-size: 15px; }
-#setup h2 { font-size: 18px; margin: 18px 0 8px; }
-#setup h2:first-child { margin-top: 4px; }
-#preview { width: 100%; max-width: 480px; display: block; background: #000; border-radius: 8px; touch-action: none; }
-#setup .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 8px 0; }
-#setup button { font: inherit; padding: 10px 14px; border-radius: 8px; border: 1px solid #444; background: #26262c; color: #fff; }
+  -webkit-overflow-scrolling: touch; text-align: left; font-size: 15px; -webkit-user-select: auto; user-select: auto;
+  padding: max(10px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right))
+           24px max(14px, env(safe-area-inset-left)); }
+#setup .cols { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (orientation: portrait) { #setup .cols { grid-template-columns: 1fr; } }
+#setup h2 { font-size: 16px; margin: 14px 0 6px; }
+#setup .cols > div > h2:first-child { margin-top: 2px; }
+#setup .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0; }
+#setup button { padding: 9px 12px; border-radius: 8px; border: 1px solid #444; background: #26262c; color: #fff; }
 #setup button.primary { background: var(--accent); border-color: var(--accent); }
-#setup input[type=range] { flex: 1; min-width: 140px; }
-#setup select { font: inherit; padding: 6px; border-radius: 6px; }
-#meter { height: 12px; background: #222; border-radius: 6px; overflow: hidden; position: relative; max-width: 480px; }
+#setup input[type=range] { flex: 1; min-width: 120px; }
+#setup .note { color: var(--muted); font-size: 12.5px; line-height: 1.6; margin: 6px 0; }
+#previewWrap { position: relative; }
+#preview { width: 100%; display: block; background: #000; border-radius: 8px; touch-action: none; }
+#badge { position: absolute; left: 8px; top: 8px; padding: 6px 12px; border-radius: 99px; font-weight: 800; font-size: 17px;
+  background: rgba(0,0,0,.7); color: #bbb; border: 2px solid #555; }
+#badge.yes { color: #fff; background: rgba(20,140,60,.9); border-color: #6f6; }
+#badge.warn { color: #111; background: rgba(255,190,40,.95); border-color: #fc3; }
+#stats { font-size: 13px; color: #ccc; line-height: 1.6; margin-top: 6px; font-variant-numeric: tabular-nums; }
+#meter { height: 12px; background: #222; border-radius: 6px; overflow: hidden; position: relative; margin-top: 4px; }
 #meterBar { height: 100%; width: 0; background: #3c9; }
 #meterTh { position: absolute; top: 0; bottom: 0; width: 2px; background: #f33; }
-#setup .note { color: var(--muted); font-size: 13px; line-height: 1.6; }
-#sales { font-size: 17px; line-height: 1.7; }
+#sales { font-size: 14px; line-height: 1.7; }
+#espUrl { flex: 1; min-width: 160px; font: inherit; padding: 6px; border-radius: 6px; }
 </style>
 </head>
 <body>
 
+<!-- 起動画面（係員が操作） -->
 <div id="start" class="screen">
-  <p style="font-size:7vmin;color:var(--text);font-weight:800">F1スタート貯金箱</p>
-  <button id="startBtn">開始</button>
-  <p>タップすると音とカメラが使えるようになります。<br>カメラの許可を求められたら「許可」を選んでください。</p>
+  <h1>F1スタート貯金箱</h1>
+  <div class="btns">
+    <button class="go" id="startApp">開始</button>
+    <button class="cfg" id="startCfg">設定・カメラ確認</button>
+  </div>
+  <p>音とカメラを使うため、最初にどちらかをタップします。カメラの許可を求められたら「許可」。</p>
   <p id="camerr"></p>
 </div>
 
+<!-- メイン画面（待機・投入待ち・スタート） -->
 <div id="stage" class="screen">
   <div id="price">キーホルダー <b>100</b> 円</div>
-  <div id="msg" class="pulse">コインを入れてスタート！</div>
   <div id="lights"></div>
-  <div id="go">GO!</div>
-  <div id="hint">1枚ずつ入れてね</div>
+  <div id="bottom">
+    <div>
+      <div id="msg"></div>
+      <div id="sub"></div>
+    </div>
+    <button id="startBtn">START</button>
+    <button id="cancelBtn">やめる</button>
+  </div>
 </div>
+
+<div id="go"><b>GO!</b><div id="track"><div id="car">🏎️</div></div></div>
 
 <div id="thanks" class="screen">
   <div class="card">
     <h1>GOAL!</h1>
-    <p>ありがとう<br>ございます！</p>
+    <p>ありがとうございます！</p>
     <small>キーホルダーをお受け取りください</small>
   </div>
 </div>
 
 <div id="jam" class="screen">
-  <p>コインがうまく<br>落ちませんでした</p>
-  <small>係員にお知らせください</small>
-  <div id="jamStatus"></div>
+  <div class="l">
+    <p>コインがうまく<br>落ちませんでした</p>
+    <small>係員にお知らせください</small>
+    <div id="jamStatus"></div>
+  </div>
   <div id="jamStaff">
     <div class="cap">係員用（1秒長押し）</div>
     <button class="hold" id="jamOpen"><i></i><span>ゲートをもう一度開ける</span></button>
@@ -147,40 +197,53 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
   </div>
 </div>
 
+<div id="rotate"><span>⟳</span>iPhone を横向きにしてください</div>
 <div id="corner"></div>
 <div id="conn"></div>
 
+<!-- 設定画面（係員用） -->
 <div id="setup">
-  <h2>カメラ（受け皿を囲むようにドラッグ）</h2>
-  <canvas id="preview" width="320" height="240"></canvas>
-  <div class="row"><span>変化 <b id="ratio">0</b>%</span><span id="presentLbl">―</span></div>
-  <div id="meter"><div id="meterBar"></div><div id="meterTh"></div></div>
-  <div class="row"><span>しきい値</span><input id="th" type="range" min="2" max="50" step="1"><b id="thVal"></b>%</div>
-  <div class="row">
-    <button id="bgBtn" class="primary">背景を記録（受け皿が空のとき）</button>
+  <div class="cols">
+    <div>
+      <h2>カメラ（受け皿を囲むようにドラッグ）</h2>
+      <div id="previewWrap">
+        <canvas id="preview" width="480" height="360"></canvas>
+        <div id="badge">―</div>
+      </div>
+      <div id="meter"><div id="meterBar"></div><div id="meterTh"></div></div>
+      <div id="stats"></div>
+      <p class="note">赤＝背景と違う部分、緑＝コインと判定したかたまり。緑の枠がコインにぴったり重なればOK。</p>
+    </div>
+    <div>
+      <h2>コイン判定の調整</h2>
+      <div class="row">
+        <button id="bgBtn" class="primary">① 背景を記録（受け皿を空に）</button>
+        <button id="coinBtn">② コインを記録（1枚置いて）</button>
+      </div>
+      <div class="row"><span>しきい値</span><input id="th" type="range" min="1" max="40" step="0.5"><b id="thVal"></b>%</div>
+      <p class="note">① 空の受け皿で「背景を記録」→ ② 100円玉を 1 枚置いて「コインを記録」すると、しきい値が自動で決まります。
+        置いたり取ったりして、左上の表示が「コインあり」「なし」に切り替わるか確かめてください。</p>
+
+      <h2>ESP32・ゲート</h2>
+      <div class="row"><span>状態</span><b id="espState">―</b></div>
+      <div class="row">
+        <button id="openBtn">ゲートを開ける</button>
+        <button id="testBtn">テスト走行（売上に数えない）</button>
+      </div>
+      <div class="row"><span>アドレス</span><input id="espUrl" type="url"></div>
+      <p class="note">iPhone の Wi-Fi を「F1BANK」に。「つながらない」ときは Safari で http://192.168.4.1/ を開き、
+        証明書のインストールと信頼の設定を済ませる（最初の 1 回だけ）。</p>
+
+      <h2>音量</h2>
+      <div class="row"><input id="vol" type="range" min="0" max="100" step="5"><b id="volVal"></b>%</div>
+
+      <h2>売上</h2>
+      <div id="sales"></div>
+      <div class="row"><button id="resetBtn">売上をリセット</button></div>
+
+      <div class="row" style="margin-top:18px"><button id="closeBtn" class="primary">閉じて営業開始</button></div>
+    </div>
   </div>
-  <p class="note">受け皿が空の状態で「背景を記録」→ コインを置いて変化が赤線を超え、外すと下回ればOK。
-    超えにくいときはしきい値を下げる、囲む範囲を受け皿ぎりぎりに狭める。</p>
-
-  <h2>ゲート・テスト</h2>
-  <div class="row">
-    <button id="openBtn">ゲートを開ける</button>
-    <button id="testBtn">テスト投入（売上に数えない）</button>
-  </div>
-  <div class="row"><span>ESP32</span><b id="espState">―</b></div>
-  <div class="row"><span>アドレス</span><input id="espUrl" type="url" style="flex:1;min-width:180px;font:inherit;padding:6px;border-radius:6px"></div>
-  <p class="note">iPhone の Wi-Fi を「F1BANK」につなぐ。「つながらない」ときは、Safari で
-    <b>http://192.168.4.1/</b> を開き、証明書のインストールと信頼の設定を済ませる（最初の 1 回だけ）。
-    右下の小さな点が緑なら接続中、赤なら切れている。</p>
-
-  <h2>音量</h2>
-  <div class="row"><input id="vol" type="range" min="0" max="100" step="5"><b id="volVal"></b>%</div>
-
-  <h2>売上</h2>
-  <div id="sales"></div>
-  <div class="row"><button id="resetBtn">売上をリセット</button></div>
-
-  <div class="row" style="margin-top:24px"><button id="closeBtn" class="primary">閉じる</button></div>
 </div>
 
 <video id="cam" playsinline muted autoplay style="display:none"></video>
@@ -189,24 +252,32 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 (function () {
   'use strict';
 
-  // ---------------- 設定 ----------------
+  // ================= 設定 =================
   const LAMPS = 5;
-  const LAMP_STEP_MS = 1000;       // F1 と同じ 1 秒間隔
+  const LAMP_STEP_MS = 1000;                    // F1 と同じ 1 秒間隔
   const HOLD_MIN_MS = 700, HOLD_MAX_MS = 2500;  // 全灯後のランダム待ち
-  const ANNOUNCE_MS = 3100;        // sound/0001.mp3 の長さ
-  const DROP_TIMEOUT_MS = 3000;    // ゲートを開けてから受け皿が空になるまでの上限
-  const THANKS_MS = 7800;          // sound/0004.mp3 の長さ
-  const HOLD_MS = 1000;            // 係員用ボタンの長押し時間
-  const OPEN_TIMEOUT_MS = 2500;    // ESP32 への指示の応答待ち
-  const PING_MS = 5000;            // 待機中に ESP32 の生存確認をする間隔
-  const PIX_DIFF = 28;             // 画素ごとの変化とみなす輝度差 (0-255)
-  const PRESENT_FRAMES = 4;        // 連続この回数「あり」で確定（誤検知防止）
-  const EMPTY_FRAMES = 4;
-  const CW = 96, CH = 72;          // 解析用の縮小サイズ
+  const ANNOUNCE_MS = 3100;                     // sound/0001.mp3 の長さ
+  const GO_MS = 2600;                           // GO! 画面（車が走る）
+  const THANKS_MS = 7800;                       // sound/0004.mp3 の長さ
+  const WAIT_COIN_MS = 30000;                   // START 後、コインを待つ時間
+  const DROP_TIMEOUT_MS = 3000;                 // ゲートを開けてから受け皿が空になるまでの上限
+  const OPEN_TIMEOUT_MS = 2500;                 // ESP32 の応答待ち
+  const PING_MS = 5000;                         // 待機中に ESP32 の生存確認をする間隔
+  const HOLD_BTN_MS = 1000;                     // 係員用ボタンの長押し時間
 
-  // ---------------- 保存 ----------------
+  // コイン判定
+  const CW = 128, CH = 96;       // 解析用の縮小サイズ（縮小でノイズも平均される）
+  const PIX_DIFF = 30;           // 色の差がこれを超えた画素を「変化」とみなす (0-255)
+  const PRESENT_FRAMES = 3;      // 連続この回数「あり」で確定
+  const EMPTY_FRAMES = 4;        // 連続この回数「なし」で空と確定
+  const OFF_RATIO = 0.6;         // 「なし」に戻るのはしきい値のこの割合を下回ったとき（ヒステリシス）
+  const GLOBAL_PCT = 70;         // 範囲のこれ以上が変わったら、コインではなく照明・カメラの変化とみなす
+  const GLOBAL_RELEARN_FRAMES = 30;  // 照明変化が約 2 秒続いたら背景を取り直す（待機中のみ）
+
+  // ================= 保存 =================
   const KEY = 'f1bank.v1';
-  const defaults = { roi: { x: 0.3, y: 0.3, w: 0.4, h: 0.4 }, th: 10, vol: 80, esp: 'https://192.168.4.1', sales: {} };
+  const defaults = { roi: { x: 0.3, y: 0.3, w: 0.4, h: 0.4 }, th: 8, coin: null, vol: 80,
+    esp: 'https://192.168.4.1', sales: {} };
   let cfg = load();
   function load() {
     try { return Object.assign({}, defaults, JSON.parse(localStorage.getItem(KEY) || '{}')); }
@@ -217,10 +288,12 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
     const d = new Date();
     return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   }
+  function addSale() { const k = today(); cfg.sales[k] = (cfg.sales[k] || 0) + 1; save(); }
 
-  // ---------------- 要素 ----------------
+  // ================= 画面要素 =================
   const $ = id => document.getElementById(id);
-  const stage = $('stage'), thanks = $('thanks'), jam = $('jam'), msg = $('msg'), go = $('go'), hint = $('hint');
+  const stage = $('stage'), thanks = $('thanks'), jam = $('jam'), goScr = $('go');
+  const msg = $('msg'), sub = $('sub'), startBtn = $('startBtn'), cancelBtn = $('cancelBtn');
   const lights = $('lights'), conn = $('conn'), video = $('cam');
   const pods = [];
   for (let i = 0; i < LAMPS; i++) {
@@ -231,15 +304,24 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
     pods.push(pod);
   }
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  function show(el) { [stage, thanks, jam].forEach(s => { s.style.display = s === el ? 'flex' : 'none'; }); }
+  function show(el) { [stage, thanks, jam, goScr].forEach(s => { s.style.display = s === el ? 'flex' : 'none'; }); }
   function setLamps(n) { pods.forEach((p, i) => p.classList.toggle('on', i < n)); }
+  function setMain(text, subText, opt) {
+    opt = opt || {};
+    msg.textContent = text;
+    msg.className = opt.pulse ? 'pulse' : '';
+    sub.textContent = subText || '';
+    startBtn.style.display = opt.start ? '' : 'none';
+    cancelBtn.style.display = opt.cancel ? '' : 'none';
+  }
 
-  // ---------------- 音 ----------------
-  let ac = null, gain = null;
+  // ================= 音 =================
+  // モーター音はなし。0001=まもなくスタート / 0004=ゴール / 0005=詰まり、電子音はその場で合成
+  let ac = null, gain = null, current = null;
   const buffers = {};
-  const FILES = { welcome: 'sound/0001.mp3', start: 'sound/0003.mp3', goal: 'sound/0004.mp3', jam: 'sound/0005.mp3' };
-  let current = null;
+  const FILES = { welcome: 'sound/0001.mp3', goal: 'sound/0004.mp3', jam: 'sound/0005.mp3' };
   function initAudio() {
+    if (ac) return;
     const AC = window.AudioContext || window.webkitAudioContext;
     ac = new AC();
     gain = ac.createGain();
@@ -261,36 +343,37 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
     s.buffer = buffers[name]; s.connect(gain); s.start(0);
     current = s;
   }
-  function beep() {
+  function tone(freq, dur, when) {
     if (!ac) return;
-    const o = ac.createOscillator(), g = ac.createGain(), t = ac.currentTime;
-    o.type = 'square'; o.frequency.value = 1000;
+    const o = ac.createOscillator(), g = ac.createGain(), t = ac.currentTime + (when || 0);
+    o.type = 'square'; o.frequency.value = freq;
     g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(0.25, t + 0.005);
-    g.gain.setValueAtTime(0.25, t + 0.16);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
-    o.connect(g); g.connect(gain); o.start(t); o.stop(t + 0.2);
+    g.gain.exponentialRampToValueAtTime(0.22, t + 0.005);
+    g.gain.setValueAtTime(0.22, t + dur - 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(gain); o.start(t); o.stop(t + dur + 0.02);
   }
+  const beep = () => tone(1000, 0.18);                       // シグナル点灯
+  const pressSound = () => tone(660, 0.1);                   // START を押した
+  const coinSound = () => { tone(1320, 0.08); tone(1760, 0.12, 0.1); };  // コインを確認
 
-  // ---------------- ESP32 への指示（Wi-Fi・HTTPS） ----------------
-  let espOk = null, espOpens = null;
+  // ================= ESP32 への指示（Wi-Fi・HTTPS） =================
+  let espOpens = null;
   function setConn(ok, opens) {
-    espOk = ok;
     if (opens !== undefined) espOpens = opens;
     conn.className = ok ? 'ok' : 'ng';
-    const el = $('espState');
-    if (el) el.textContent = ok ? '接続中（ゲートを開いた回数 ' + espOpens + '）' : 'つながらない';
+    $('espState').textContent = ok ? '接続中（ゲートを開いた回数 ' + espOpens + '）' : 'つながらない';
   }
   function espGet(path) {
     const ctl = window.AbortController ? new AbortController() : null;
     const timer = setTimeout(() => { if (ctl) ctl.abort(); }, OPEN_TIMEOUT_MS);
-    return fetch(cfg.esp.replace(/\/$/, '') + path + (path.indexOf('?') < 0 ? '?' : '&') + 't=' + Date.now(),
+    return fetch(cfg.esp.replace(/\/$/, '') + path + '?t=' + Date.now(),
       { cache: 'no-store', signal: ctl ? ctl.signal : undefined })
       .then(r => r.json())
       .finally(() => clearTimeout(timer));
   }
   async function sendOpen() {
-    // 応答が返らなかったときだけ 1 回やり直す（開きっぱなしの二重要求は ESP32 側で無視）
+    // 応答が返らなかったときだけ 1 回やり直す（開いている最中の二重要求は ESP32 側で無視）
     for (let i = 0; i < 2; i++) {
       try {
         const j = await espGet('/open');
@@ -305,14 +388,18 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
     catch (e) { setConn(false); }
   }
 
-  // ---------------- カメラ検知 ----------------
+  // ================= コイン判定 =================
+  // 背景（空の受け皿）との色の差を取り、ノイズを除いた「変化のかたまり」のうち最大のものの
+  // 面積で判定する。カメラの自動露出で全体の明るさが変わっても誤検知しないよう、
+  // 画素ごとの明るさの比の中央値で背景を補正してから比べる。
   const work = document.createElement('canvas');
   work.width = CW; work.height = CH;
   const wctx = work.getContext('2d', { willReadFrequently: true });
-  let bg = null;            // 背景（空の受け皿）
-  let ratio = 0;            // 変化した画素の割合 %
-  let present = false, hitRun = 0, missRun = 0;
-  let camOK = false;
+  let camOK = false, camErr = '';
+  let bg = null;                 // { a: Float32Array(RGB), w, h }
+  let present = false, hitRun = 0, missRun = 0, globalRun = 0;
+  let simCoin = false;           // カメラなしで試すとき（c キー）
+  let det = { area: 0, all: 0, gain: 1, global: false, box: null, raw: null, blob: null, w: 0, h: 0 };
 
   function roiPx() {
     const r = cfg.roi;
@@ -321,32 +408,90 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
     return { x0, y0, x1, y1 };
   }
   function grab() {
+    if (!camOK || video.readyState < 2) return null;
     wctx.drawImage(video, 0, 0, CW, CH);
     const { x0, y0, x1, y1 } = roiPx();
     const w = x1 - x0, h = y1 - y0;
-    if (w < 2 || h < 2) return null;
-    const d = wctx.getImageData(x0, y0, w, h).data;
-    const g = new Float32Array(w * h);
-    for (let i = 0, j = 0; j < g.length; i += 4, j++) g[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-    return g;
+    if (w < 4 || h < 4) return null;
+    const d = wctx.getImageData(x0, y0, w, h).data, n = w * h, a = new Float32Array(n * 3);
+    for (let i = 0, j = 0; i < n; i++, j += 4) { a[i * 3] = d[j]; a[i * 3 + 1] = d[j + 1]; a[i * 3 + 2] = d[j + 2]; }
+    return { a, w, h };
   }
-  function learnBackground() { bg = grab(); present = false; hitRun = missRun = 0; }
+  function resetDetect() { present = false; hitRun = missRun = globalRun = 0; }
+  function learnBackground() { const f = grab(); if (f) { bg = f; resetDetect(); } }
 
   function analyze() {
-    if (!camOK || video.readyState < 2) return;
-    const g = grab();
-    if (!g) return;
-    if (!bg || bg.length !== g.length) { bg = g; return; }
-    let n = 0;
-    for (let i = 0; i < g.length; i++) if (Math.abs(g[i] - bg[i]) > PIX_DIFF) n++;
-    ratio = 100 * n / g.length;
-    const hit = ratio > cfg.th;
-    if (hit) { hitRun++; missRun = 0; } else { missRun++; hitRun = 0; }
-    if (!present && hitRun >= PRESENT_FRAMES) present = true;
-    if (present && missRun >= EMPTY_FRAMES) present = false;
-    // 空のあいだは照明のゆっくりした変化に背景を追従させる
-    if (!present && !hit) for (let i = 0; i < g.length; i++) bg[i] += (g[i] - bg[i]) * 0.02;
+    const f = grab();
+    if (!f) return;
+    if (!bg || bg.w !== f.w || bg.h !== f.h) { bg = f; return; }
+    const w = f.w, h = f.h, n = w * h, A = f.a, B = bg.a;
+
+    // 露出補正: 明るさの比の中央値（コインは範囲の半分未満なので中央値には効かない）
+    const ratios = [];
+    for (let i = 0; i < n; i += 2) {
+      const lb = B[i * 3] + B[i * 3 + 1] + B[i * 3 + 2];
+      if (lb > 30) ratios.push((A[i * 3] + A[i * 3 + 1] + A[i * 3 + 2]) / lb);
+    }
+    ratios.sort((x, y) => x - y);
+    const g = Math.min(1.6, Math.max(0.6, ratios.length ? ratios[ratios.length >> 1] : 1));
+
+    // 色の差（RGB のうち一番大きい差）
+    const raw = new Uint8Array(n);
+    let all = 0;
+    for (let i = 0; i < n; i++) {
+      const k = i * 3;
+      const dd = Math.max(Math.abs(A[k] - g * B[k]), Math.abs(A[k + 1] - g * B[k + 1]), Math.abs(A[k + 2] - g * B[k + 2]));
+      if (dd > PIX_DIFF) { raw[i] = 1; all++; }
+    }
+    // 孤立した点を消す（上下左右のうち 2 つ以上も変化している画素だけ残す）
+    const m = new Uint8Array(n);
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      if (raw[i] && raw[i - 1] + raw[i + 1] + raw[i - w] + raw[i + w] >= 2) m[i] = 1;
+    }
+    // いちばん大きい「かたまり」を探す
+    const lab = new Int32Array(n), stack = [];
+    let id = 0, best = 0, bestId = 0, box = null;
+    for (let i = 0; i < n; i++) {
+      if (!m[i] || lab[i]) continue;
+      id++; lab[i] = id; stack.push(i);
+      let area = 0, x0 = w, y0 = h, x1 = 0, y1 = 0;
+      while (stack.length) {
+        const p = stack.pop(), px = p % w, py = (p / w) | 0;
+        area++;
+        if (px < x0) x0 = px; if (px > x1) x1 = px; if (py < y0) y0 = py; if (py > y1) y1 = py;
+        if (px > 0 && m[p - 1] && !lab[p - 1]) { lab[p - 1] = id; stack.push(p - 1); }
+        if (px < w - 1 && m[p + 1] && !lab[p + 1]) { lab[p + 1] = id; stack.push(p + 1); }
+        if (py > 0 && m[p - w] && !lab[p - w]) { lab[p - w] = id; stack.push(p - w); }
+        if (py < h - 1 && m[p + w] && !lab[p + w]) { lab[p + w] = id; stack.push(p + w); }
+      }
+      if (area > best) { best = area; bestId = id; box = { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 }; }
+    }
+    const areaPct = 100 * best / n, allPct = 100 * all / n;
+    const global = allPct > GLOBAL_PCT;
+
+    // 判定（ヒステリシス＋連続フレーム）
+    const on = !global && areaPct >= cfg.th;
+    const off = global || areaPct < cfg.th * OFF_RATIO;
+    if (!present) { hitRun = on ? hitRun + 1 : 0; if (hitRun >= PRESENT_FRAMES) { present = true; missRun = 0; } }
+    else { missRun = off ? missRun + 1 : 0; if (missRun >= EMPTY_FRAMES) { present = false; hitRun = 0; } }
+
+    // 空のあいだは、変化していない画素だけ背景をゆっくり更新（照明のゆるやかな変化に追従）
+    if (!present && !global) {
+      for (let i = 0; i < n; i++) if (!raw[i]) {
+        const k = i * 3;
+        B[k] += (A[k] - B[k]) * 0.03; B[k + 1] += (A[k + 1] - B[k + 1]) * 0.03; B[k + 2] += (A[k + 2] - B[k + 2]) * 0.03;
+      }
+    }
+    // 照明が大きく変わったまま続いたら背景を取り直す（待機中だけ）
+    globalRun = global ? globalRun + 1 : 0;
+    if (globalRun >= GLOBAL_RELEARN_FRAMES && state === 'idle' && !holdOff) { bg = f; resetDetect(); }
+
+    const blob = new Uint8Array(n);
+    if (bestId) for (let i = 0; i < n; i++) if (lab[i] === bestId) blob[i] = 1;
+    det = { area: areaPct, all: allPct, gain: g, global, box, raw: m, blob, w, h };
   }
+  function coinHere() { return camOK ? present : simCoin; }
 
   async function startCamera() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -358,27 +503,73 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
     video.srcObject = stream;
     await video.play();
     camOK = true;
-    setTimeout(learnBackground, 800);
+    setTimeout(learnBackground, 800);   // 起動時は受け皿が空の前提
   }
 
-  // ---------------- 本体 ----------------
-  let busy = false, setupOpen = false;
+  // ================= 本体の流れ =================
+  // idle → wait（コイン待ち）→ check（ゲートを開けて落ちたか確認）→ race → goal → idle
+  let state = 'idle';
+  let cancelReq = false;
+  let holdOff = false;   // 詰まりをリセットした後、受け皿が空になるまで受け付けない
 
-  function addSale() {
-    const k = today();
-    cfg.sales[k] = (cfg.sales[k] || 0) + 1;
-    save();
-  }
   function idle() {
+    state = 'idle';
     show(stage);
     setLamps(0);
-    go.style.display = 'none';
-    lights.style.display = 'flex';
-    const blocked = holdOff && present;
-    msg.textContent = blocked ? '準備中です' : 'コインを入れてスタート！';
-    msg.className = blocked ? '' : 'pulse';
-    hint.textContent = blocked ? '受け皿にコインが残っています（係員が取り除いてください）'
-      : camOK ? '1枚ずつ入れてね' : 'カメラ未接続（t キーでテスト）';
+    if (holdOff && coinHere()) {
+      setMain('準備中です', '受け皿にコインが残っています（係員が取り除いてください）');
+    } else {
+      setMain('スタートボタンを押してね', camOK || !started ? '' : 'カメラ未接続（c キーでコインを模擬）', { pulse: true, start: true });
+    }
+  }
+
+  async function run(isTest) {
+    if (state !== 'idle' || holdOff) return;
+    // ---- コイン待ち ----
+    if (!isTest) {
+      state = 'wait';
+      cancelReq = false;
+      const t0 = Date.now();
+      while (!coinHere()) {
+        const left = Math.ceil((WAIT_COIN_MS - (Date.now() - t0)) / 1000);
+        setMain('100円玉を入れてください', '上の投入口へ 1 枚ずつ　（あと ' + left + ' 秒）', { pulse: true, cancel: true });
+        if (left <= 0 || cancelReq) { idle(); return; }
+        await sleep(100);
+      }
+      // ---- コインを検知 → ゲートを開ける ----
+      state = 'check';
+      addSale();
+      coinSound();
+      setMain('コインを確認しました！', 'ゲートを開けています');
+      await sleep(500);
+      const sent = await sendOpen();
+      const dropped = sent && await waitUntil(() => !coinHere(), DROP_TIMEOUT_MS);
+      if (!dropped) {
+        state = 'jam';
+        if (await jamLoop() === 'reset') { idle(); return; }
+      }
+    }
+    // ---- スタート ----
+    state = 'race';
+    show(stage);
+    setMain('まもなくスタート', '');
+    play('welcome');
+    await sleep(ANNOUNCE_MS);
+    for (let i = 1; i <= LAMPS; i++) { setLamps(i); beep(); await sleep(LAMP_STEP_MS); }
+    await sleep(HOLD_MIN_MS + Math.random() * (HOLD_MAX_MS - HOLD_MIN_MS));
+    // 一斉消灯 = GO!（音なし）
+    setLamps(0);
+    const car = $('car');
+    car.className = '';
+    show(goScr);
+    void car.offsetWidth;          // アニメーションを最初からやり直す
+    car.className = 'run';
+    await sleep(GO_MS);
+    // ---- ゴール ----
+    show(thanks);
+    play('goal');
+    await sleep(THANKS_MS);
+    idle();
   }
 
   async function waitUntil(fn, timeout) {
@@ -387,66 +578,22 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
     return fn();
   }
 
-  async function race(isTest) {
-    busy = true;
-    if (!isTest) addSale();
-    msg.textContent = 'まもなくスタート';
-    msg.className = '';
-    hint.textContent = '';
-    play('welcome');
-    await sleep(ANNOUNCE_MS);
-
-    for (let i = 1; i <= LAMPS; i++) {
-      setLamps(i); beep();
-      await sleep(LAMP_STEP_MS);
-    }
-    await sleep(HOLD_MIN_MS + Math.random() * (HOLD_MAX_MS - HOLD_MIN_MS));
-
-    // 消灯 = スタート
-    setLamps(0);
-    msg.textContent = '';
-    lights.style.display = 'none';
-    go.style.display = 'block';
-    play('start');
-    await sendOpen();
-
-    const dropped = isTest || !camOK || await waitUntil(() => !present, DROP_TIMEOUT_MS);
-    await sleep(600);
-    if (dropped) {
-      show(thanks); play('goal');
-      await sleep(THANKS_MS);
-    } else {
-      await jamLoop();
-    }
-    idle();
-    busy = false;
-  }
-
-  // ---------------- コイン詰まり ----------------
-  // 受け皿が空になる（手で取るなど）か、係員が長押しボタンで対応するまでこの画面にとどまる
+  // ================= コイン詰まり =================
+  // 受け皿が空になる（ゲートを開け直す・手で取る）とスタートへ進む。「リセット」なら待機へ
   let jamAction = null;
-  let holdOff = false;   // リセット後、受け皿が空になるまでスタートしない
   async function jamLoop() {
     jamAction = null;
     $('jamStatus').textContent = '';
-    show(jam); play('jam');
+    show(jam);
+    play('jam');
     for (;;) {
-      if (!present) return;                      // 空になった → 待機へ
-      if (jamAction === 'reset') {
-        // 待機に戻す。コインが残っていたら、係員が取り除くまで次のスタートを止めておく
-        // （背景を覚え直すと、取り除いたときの変化をコイン投入と誤検知してしまう）
-        holdOff = true;
-        return;
-      }
+      if (!coinHere()) return 'dropped';
+      if (jamAction === 'reset') { holdOff = true; return 'reset'; }
       if (jamAction === 'open') {
         jamAction = null;
         $('jamStatus').textContent = 'ゲートを開けています…';
         const sent = await sendOpen();
-        if (sent && await waitUntil(() => !present, DROP_TIMEOUT_MS)) {
-          show(thanks); play('goal');
-          await sleep(THANKS_MS);
-          return;
-        }
+        if (sent && await waitUntil(() => !coinHere(), DROP_TIMEOUT_MS)) return 'dropped';
         $('jamStatus').textContent = sent ? 'まだコインが残っています' : 'ESP32 につながりません';
       }
       await sleep(100);
@@ -455,8 +602,9 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
   function holdButton(el, action) {
     const bar = el.querySelector('i');
     let t0 = 0, timer = 0;
+    const cancel = () => { clearInterval(timer); bar.style.width = '0'; };
     const step = () => {
-      const k = Math.min(1, (Date.now() - t0) / HOLD_MS);
+      const k = Math.min(1, (Date.now() - t0) / HOLD_BTN_MS);
       bar.style.width = (k * 100) + '%';
       if (k < 1) return;
       cancel();
@@ -465,7 +613,6 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
       jamAction = action;
     };
     const begin = e => { e.preventDefault(); cancel(); t0 = Date.now(); timer = setInterval(step, 30); };
-    const cancel = () => { clearInterval(timer); bar.style.width = '0'; };
     el.addEventListener('touchstart', begin, { passive: false });
     el.addEventListener('touchend', cancel);
     el.addEventListener('touchcancel', cancel);
@@ -476,30 +623,67 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
   holdButton($('jamOpen'), 'open');
   holdButton($('jamReset'), 'reset');
 
+  // ================= 周期処理 =================
+  let setupOpen = false;
   function tick() {
     analyze();
-    if (holdOff && !present) { holdOff = false; if (!busy) idle(); }
-    if (!busy && !setupOpen && present && !holdOff) race(false);
+    if (holdOff && !coinHere()) { holdOff = false; if (state === 'idle') idle(); }
+    // START を押さずにコインを入れた場合もそのまま進める
+    if (state === 'idle' && !setupOpen && !holdOff && coinHere()) run(false);
     if (setupOpen) drawPreview();
   }
 
-  // ---------------- 設定画面 ----------------
+  // ================= 設定画面 =================
   const preview = $('preview'), pctx = preview.getContext('2d');
+  const ovl = document.createElement('canvas'), octx = ovl.getContext('2d');
+  ovl.width = CW; ovl.height = CH;
   function drawPreview() {
+    const W = preview.width, H = preview.height;
     if (camOK && video.readyState >= 2) {
-      pctx.drawImage(video, 0, 0, preview.width, preview.height);
+      pctx.drawImage(video, 0, 0, W, H);
     } else {
-      pctx.fillStyle = '#000'; pctx.fillRect(0, 0, preview.width, preview.height);
-      pctx.fillStyle = '#888'; pctx.font = '16px sans-serif'; pctx.fillText('カメラなし', 12, 24);
+      pctx.fillStyle = '#000'; pctx.fillRect(0, 0, W, H);
+      pctx.fillStyle = '#888'; pctx.font = '18px sans-serif';
+      pctx.fillText('カメラなし' + (camErr ? '：' + camErr : ''), 14, H - 16);
+    }
+    const { x0, y0 } = roiPx(), sx = W / CW, sy = H / CH;
+    // 変化した画素（赤）とコインと判定したかたまり（緑）を重ねる
+    if (det.raw && det.w) {
+      const img = octx.createImageData(det.w, det.h);
+      for (let i = 0; i < det.w * det.h; i++) {
+        const j = i * 4;
+        if (det.blob[i]) { img.data[j] = 40; img.data[j + 1] = 255; img.data[j + 2] = 110; img.data[j + 3] = 150; }
+        else if (det.raw[i]) { img.data[j] = 255; img.data[j + 1] = 50; img.data[j + 2] = 50; img.data[j + 3] = 130; }
+      }
+      octx.clearRect(0, 0, CW, CH);
+      octx.putImageData(img, 0, 0);
+      pctx.imageSmoothingEnabled = false;
+      pctx.drawImage(ovl, 0, 0, det.w, det.h, x0 * sx, y0 * sy, det.w * sx, det.h * sy);
+      pctx.imageSmoothingEnabled = true;
     }
     const r = cfg.roi;
-    pctx.strokeStyle = present ? '#f33' : '#3c9'; pctx.lineWidth = 3;
-    pctx.strokeRect(r.x * preview.width, r.y * preview.height, r.w * preview.width, r.h * preview.height);
-    $('ratio').textContent = ratio.toFixed(1);
-    $('presentLbl').textContent = present ? 'コインあり' : '空';
-    $('meterBar').style.width = Math.min(100, ratio * 2) + '%';
-    $('meterBar').style.background = ratio > cfg.th ? '#f33' : '#3c9';
-    $('meterTh').style.left = Math.min(100, cfg.th * 2) + '%';
+    pctx.lineWidth = 3; pctx.strokeStyle = '#fff'; pctx.setLineDash([8, 6]);
+    pctx.strokeRect(r.x * W, r.y * H, r.w * W, r.h * H);
+    pctx.setLineDash([]);
+    if (det.box && det.area > 0.5) {
+      pctx.strokeStyle = coinHere() ? '#6f6' : '#fc3';
+      pctx.strokeRect((x0 + det.box.x) * sx, (y0 + det.box.y) * sy, det.box.w * sx, det.box.h * sy);
+    }
+    const badge = $('badge');
+    if (det.global) { badge.textContent = '⚠ 明るさが大きく変化'; badge.className = 'warn'; }
+    else if (coinHere()) { badge.textContent = '● コインあり'; badge.className = 'yes'; }
+    else { badge.textContent = '○ コインなし'; badge.className = ''; }
+    $('stats').textContent = 'かたまりの大きさ ' + det.area.toFixed(1) + '%　しきい値 ' + cfg.th + '%' +
+      (cfg.coin ? '（記録したコイン ' + cfg.coin.toFixed(1) + '%）' : '') +
+      '　全体の変化 ' + det.all.toFixed(0) + '%　明るさ補正 ×' + det.gain.toFixed(2);
+    const scale = 100 / Math.max(20, (cfg.coin || cfg.th * 2) * 1.3);
+    $('meterBar').style.width = Math.min(100, det.area * scale) + '%';
+    $('meterBar').style.background = det.area >= cfg.th ? '#3c9' : '#777';
+    $('meterTh').style.left = Math.min(100, cfg.th * scale) + '%';
+  }
+  function fitPreview() {
+    const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
+    preview.width = 480; preview.height = Math.round(480 * vh / vw);
   }
   function renderSales() {
     const days = Object.keys(cfg.sales).sort();
@@ -509,11 +693,14 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
       '<br><b>合計 ' + total + ' 枚（' + (total * 100).toLocaleString() + ' 円）</b>';
   }
   function openSetup() {
+    if (state !== 'idle') return;
     setupOpen = true;
     document.body.classList.add('setup-open');
     $('setup').style.display = 'block';
     $('th').value = cfg.th; $('thVal').textContent = cfg.th;
     $('vol').value = cfg.vol; $('volVal').textContent = cfg.vol;
+    $('espUrl').value = cfg.esp;
+    fitPreview();
     renderSales();
     ping();
   }
@@ -522,15 +709,17 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
     document.body.classList.remove('setup-open');
     $('setup').style.display = 'none';
     save();
+    idle();
   }
 
-  // ROI をドラッグで指定
+  // 受け皿の範囲をドラッグで指定
   let drag = null;
   function pos(e) {
     const r = preview.getBoundingClientRect(), p = e.touches ? e.touches[0] : e;
     return { x: Math.min(1, Math.max(0, (p.clientX - r.left) / r.width)), y: Math.min(1, Math.max(0, (p.clientY - r.top) / r.height)) };
   }
-  function dStart(e) { e.preventDefault(); drag = pos(e); }
+  preview.addEventListener('touchstart', e => { e.preventDefault(); drag = pos(e); }, { passive: false });
+  preview.addEventListener('mousedown', e => { e.preventDefault(); drag = pos(e); });
   function dMove(e) {
     if (!drag) return; e.preventDefault();
     const p = pos(e);
@@ -539,33 +728,40 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
   function dEnd() {
     if (!drag) return; drag = null;
     if (cfg.roi.w < 0.05 || cfg.roi.h < 0.05) cfg.roi = defaults.roi;
+    cfg.coin = null;   // 範囲が変わるとコインの大きさ(%)も変わる
     save(); learnBackground();
   }
-  preview.addEventListener('touchstart', dStart, { passive: false });
   preview.addEventListener('touchmove', dMove, { passive: false });
-  preview.addEventListener('touchend', dEnd);
-  preview.addEventListener('mousedown', dStart);
   window.addEventListener('mousemove', dMove);
+  preview.addEventListener('touchend', dEnd);
   window.addEventListener('mouseup', dEnd);
 
+  $('bgBtn').addEventListener('click', learnBackground);
+  $('coinBtn').addEventListener('click', () => {
+    if (det.global || det.area < 1) { alert('コインが見つかりません。受け皿に 1 枚置いてから押してください。'); return; }
+    cfg.coin = det.area;
+    cfg.th = Math.max(1, Math.round(det.area * 0.45 * 2) / 2);   // コインの大きさの 45%
+    $('th').value = cfg.th; $('thVal').textContent = cfg.th;
+    save();
+  });
   $('th').addEventListener('input', e => { cfg.th = +e.target.value; $('thVal').textContent = cfg.th; save(); });
   $('vol').addEventListener('input', e => {
     cfg.vol = +e.target.value; $('volVal').textContent = cfg.vol;
     if (gain) gain.gain.value = cfg.vol / 100; save();
   });
-  $('bgBtn').addEventListener('click', learnBackground);
+  $('espUrl').addEventListener('change', e => { cfg.esp = e.target.value.trim() || defaults.esp; save(); ping(); });
   $('openBtn').addEventListener('click', () => { sendOpen(); });
-  $('testBtn').addEventListener('click', () => { if (!busy) { closeSetup(); race(true); } });
+  $('testBtn').addEventListener('click', () => { closeSetup(); run(true); });
   $('resetBtn').addEventListener('click', () => {
     if (confirm('売上の記録をすべて消しますか？')) { cfg.sales = {}; save(); renderSales(); }
   });
   $('closeBtn').addEventListener('click', closeSetup);
 
-  const espUrl = $('espUrl');
-  espUrl.value = cfg.esp;
-  espUrl.addEventListener('change', () => { cfg.esp = espUrl.value.trim() || defaults.esp; save(); ping(); });
+  // お客さんの操作
+  startBtn.addEventListener('click', () => { if (state === 'idle') { pressSound(); run(false); } });
+  cancelBtn.addEventListener('click', () => { cancelReq = true; });
 
-  // 左上を 2 秒長押しで設定を開く（お客さんが触っても開かないように）
+  // 待機中に左上を 2 秒長押しで設定を開く
   let pressT = null;
   const corner = $('corner');
   const pressStart = e => { e.preventDefault(); pressT = setTimeout(openSetup, 2000); };
@@ -575,30 +771,35 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
   corner.addEventListener('mousedown', pressStart);
   corner.addEventListener('mouseup', pressEnd);
 
-  // PC での動作確認用
+  // PC での確認用
   window.addEventListener('keydown', e => {
-    if (e.key === 't' && !busy && !setupOpen) race(true);
+    if (e.key === 't' && state === 'idle' && !setupOpen) run(true);
+    if (e.key === 'c') simCoin = !simCoin;
     if (e.key === 's') setupOpen ? closeSetup() : openSetup();
   });
 
-  // ---------------- 開始 ----------------
-  let tries = 0;
-  $('startBtn').addEventListener('click', async () => {
-    if (tries++ === 0) {
-      initAudio();
-      try { await startCamera(); }
-      catch (err) {
-        // 失敗したら理由を見せて止まる。もう一度押すとカメラなしで続行（テスト用）
-        $('camerr').textContent = 'カメラを使えません: ' + (err.message || err.name);
-        $('startBtn').textContent = 'カメラなしで続ける';
-        return;
-      }
-    }
-    $('start').style.display = 'none';
-    idle();
+  // ================= 起動 =================
+  let started = false;
+  async function boot() {
+    if (started) return;
+    started = true;
+    initAudio();
+    try { await startCamera(); }
+    catch (err) { camErr = err.message || err.name; }
     setInterval(tick, 66);   // 約 15 fps
     ping();
-    setInterval(() => { if (!busy) ping(); }, PING_MS);
+    setInterval(() => { if (state === 'idle') ping(); }, PING_MS);
+  }
+  $('startApp').addEventListener('click', async () => {
+    await boot();
+    $('start').style.display = 'none';
+    idle();
+  });
+  $('startCfg').addEventListener('click', async () => {
+    await boot();
+    $('start').style.display = 'none';
+    idle();
+    openSetup();
   });
   idle();
 
