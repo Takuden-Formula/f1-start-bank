@@ -12,17 +12,17 @@
 <!--
   F1スタート貯金箱（iPhone 6s 版・横画面）— 紅陵祭2026 電気自動車同好会
 
-  流れ: START → 100円玉を入れる → 背面カメラが受け皿のコインを検知 → F1 スタートシグナル
+  流れ: START → 100円玉を入れる → ピンボールを落ちて下のポケットで止まり、ESP32 のセンサーが検知
+        （iPhone は https://192.168.4.1/coin を 0.15 秒ごとに読む）→ F1 スタートシグナル
         → 一斉消灯（GO）と同時に ESP32 へ https://192.168.4.1/open?ms=…（SG90 がゲートを開け、
           指定時間後に ESP32 が自動で閉じる）→ GO から設定の秒数でゴール（お礼）
         ゲートが閉じるまでに受け皿が空にならなければ詰まりの画面。
   iPhone は ESP32 が出す Wi-Fi「F1BANK」につなぐ（インターネット不要）。
   オフラインでも開けるよう sw.js で自身をキャッシュする。
-  カメラは HTTPS か localhost でしか使えない（iOS Safari の制約）。
 
-  設定: 起動画面の「設定・カメラ確認」、または右上の歯車を 1 秒長押し（どの画面からでも。
+  設定: 起動画面の「設定」、または右上の歯車を 1 秒長押し（どの画面からでも。
         演出の途中なら中断して設定を開く）。
-  PC での確認用キー: t=テスト走行 / c=コインあり・なし切り替え（カメラなしのとき） / s=設定
+  PC での確認用キー: t=テスト走行 / c=コインあり・なし切り替え（ESP32 なしのとき） / s=設定
 -->
 <style>
 :root {
@@ -189,11 +189,9 @@ body:not(.booted) #gear, body:not(.booted) #conn { display: none; }
 input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
 .val { font-variant-numeric: tabular-nums; min-width: 4.5em; text-align: right; color: var(--text); }
 .note { color: var(--muted); font-size: 12px; line-height: 1.65; margin: 10px 0 0; }
-#previewWrap { position: relative; border-radius: 8px; overflow: hidden; background: #000; }
-#preview { width: 100%; display: block; touch-action: none; }
-#badge { position: absolute; left: 10px; top: 10px; display: flex; align-items: center; gap: 7px; padding: 6px 11px; border-radius: 6px;
-  background: rgba(0,0,0,.72); font-size: 13px; font-weight: 700; color: #bbb; }
-#badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #666; }
+#badge { display: flex; align-items: center; justify-content: center; gap: 10px; height: 92px; border-radius: 8px;
+  background: #0f0f11; border: 1px solid var(--line); font-size: 22px; font-weight: 700; color: #bbb; }
+#badge::before { content: ""; width: 12px; height: 12px; border-radius: 50%; background: #666; }
 #badge.yes { color: #fff; } #badge.yes::before { background: var(--green); }
 #badge.warn { color: var(--amber); } #badge.warn::before { background: var(--amber); }
 #meter { position: relative; height: 6px; margin-top: 12px; background: #222226; border-radius: 3px; overflow: hidden; }
@@ -219,9 +217,9 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
   <h1><span class="en">F1 Start Bank</span><span class="jp">F1スタート貯金箱</span></h1>
   <div class="btns">
     <button class="btn primary" id="startApp">営業を開始</button>
-    <button class="btn" id="startCfg">設定・カメラ確認</button>
+    <button class="btn" id="startCfg">設定</button>
   </div>
-  <p class="note">音とカメラを使うため、はじめにどちらかをタップします。カメラの許可を求められたら「許可」を選んでください。<br><span id="camerr"></span></p>
+  <p class="note">音を鳴らすため、はじめにどちらかをタップします。iPhone の Wi-Fi は「F1BANK」につないでおきます。</p>
 </section>
 
 <!-- メイン画面（待機・投入待ち・スタート） -->
@@ -297,24 +295,14 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
   </header>
   <div class="s-grid">
     <section class="panel">
-      <h3>カメラ・コイン判定</h3>
-      <div id="previewWrap">
-        <canvas id="preview" width="480" height="360"></canvas>
-        <div id="badge">―</div>
-      </div>
-      <div id="meter"><div id="meterBar"></div><div id="meterTh"></div></div>
+      <h3>コインセンサー</h3>
+      <div id="badge">―</div>
       <dl class="kv">
-        <dt>かたまり</dt><dd id="kvArea">―</dd>
-        <dt>しきい値</dt><dd id="kvTh">―</dd>
-        <dt>明るさ補正</dt><dd id="kvGain">―</dd>
+        <dt>センサーが数えた枚数</dt><dd id="kvCoins">―</dd>
+        <dt>この iPhone の売上</dt><dd id="kvSales">―</dd>
       </dl>
-      <div class="row">
-        <button class="sb" id="bgBtn">① 背景を記録（空の受け皿）</button>
-        <button class="sb" id="coinBtn">② コインを記録（1 枚置く）</button>
-      </div>
-      <div class="row"><span>しきい値</span><input id="th" type="range" min="1" max="40" step="0.5"><span class="val" id="thVal"></span></div>
-      <p class="note">映像の上をドラッグして受け皿を囲みます（点線）。赤は背景と違う部分、緑はコインと判定したかたまりです。
-        ①→② の順に押すと、しきい値が自動で決まります。</p>
+      <p class="note">ポケットにコインが止まっていると「コインあり」。センサー（TCRT5000 モジュール）の感度は、
+        モジュールの青い半固定抵抗で調整します。コインを置いたときだけ「あり」になり、取ると「なし」に戻る位置に合わせます。</p>
     </section>
 
     <div class="s-col">
@@ -367,7 +355,6 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
   </div>
 </div>
 
-<video id="cam" playsinline muted autoplay style="display:none"></video>
 
 <script>
 (function () {
@@ -386,17 +373,11 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
   const HOLD_BTN_MS = 1000;                     // 係員用ボタン・歯車の長押し時間
   const CYCLE_MS = 1500;                        // 設定画面の「開閉テスト」で開けておく時間
 
-  // コイン判定
-  const CW = 128, CH = 96;
-  const PIX_DIFF = 30;
-  const PRESENT_FRAMES = 3, EMPTY_FRAMES = 4;
-  const OFF_RATIO = 0.6;
-  const GLOBAL_PCT = 70;
-  const GLOBAL_RELEARN_FRAMES = 30;
+  const POLL_MS = 150;                          // コインセンサーを読む間隔
 
   // ================= 保存 =================
   const KEY = 'f1bank.v1';
-  const defaults = { roi: { x: 0.3, y: 0.3, w: 0.4, h: 0.4 }, th: 8, coin: null, vol: 80, goSec: 7, gateSec: 5,
+  const defaults = { vol: 80, goSec: 7, gateSec: 5,
     esp: 'https://192.168.4.1', sales: {} };
   let cfg = load();
   function load() {
@@ -413,7 +394,7 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
   // ================= 画面要素 =================
   const $ = id => document.getElementById(id);
   const stage = $('stage'), thanks = $('thanks'), jam = $('jam'), goScr = $('go');
-  const msg = $('msg'), sub = $('sub'), video = $('cam');
+  const msg = $('msg'), sub = $('sub');
   const pods = [];
   for (let i = 0; i < LAMPS; i++) {
     const pod = document.createElement('div');
@@ -542,123 +523,26 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
   }
   const ping = () => espCall('/status');
 
-  // ================= コイン判定 =================
-  // 背景（空の受け皿）との色の差を取り、ノイズを除いた「変化のかたまり」のうち最大のものの
-  // 面積で判定する。自動露出で全体の明るさが変わっても誤検知しないよう、
-  // 画素ごとの明るさの比の中央値で背景を補正してから比べる。
-  const work = document.createElement('canvas');
-  work.width = CW; work.height = CH;
-  const wctx = work.getContext('2d', { willReadFrequently: true });
-  let camOK = false, camErr = '';
-  let bg = null;
-  let present = false, hitRun = 0, missRun = 0, globalRun = 0;
-  let simCoin = false;
-  let det = { area: 0, all: 0, gain: 1, global: false, box: null, raw: null, blob: null, w: 0, h: 0 };
-
-  function roiPx() {
-    const r = cfg.roi;
-    const x0 = Math.max(0, Math.floor(r.x * CW)), y0 = Math.max(0, Math.floor(r.y * CH));
-    const x1 = Math.min(CW, Math.ceil((r.x + r.w) * CW)), y1 = Math.min(CH, Math.ceil((r.y + r.h) * CH));
-    return { x0, y0, x1, y1 };
+  // ================= コイン判定（ESP32 のセンサー） =================
+  // /coin を POLL_MS ごとに読む。前の問い合わせが終わるまで次は送らない
+  let espOk = false, coinNow = false, coinsSeen = null, polling = false;
+  let simCoin = false;   // ESP32 なしで試すとき（c キー）
+  async function pollCoin() {
+    if (polling) return;
+    polling = true;
+    try {
+      const j = await espGet('/coin');
+      espOk = !!j.ok;
+      coinNow = !!j.coin;
+      coinsSeen = j.coins;
+      $('conn').className = 'ok';
+    } catch (e) {
+      espOk = false;
+      $('conn').className = 'ng';
+    }
+    polling = false;
   }
-  function grab() {
-    if (!camOK || video.readyState < 2) return null;
-    wctx.drawImage(video, 0, 0, CW, CH);
-    const { x0, y0, x1, y1 } = roiPx();
-    const w = x1 - x0, h = y1 - y0;
-    if (w < 4 || h < 4) return null;
-    const d = wctx.getImageData(x0, y0, w, h).data, n = w * h, a = new Float32Array(n * 3);
-    for (let i = 0, j = 0; i < n; i++, j += 4) { a[i * 3] = d[j]; a[i * 3 + 1] = d[j + 1]; a[i * 3 + 2] = d[j + 2]; }
-    return { a, w, h };
-  }
-  function resetDetect() { present = false; hitRun = missRun = globalRun = 0; }
-  function learnBackground() { const f = grab(); if (f) { bg = f; resetDetect(); } }
-
-  function analyze() {
-    const f = grab();
-    if (!f) return;
-    if (!bg || bg.w !== f.w || bg.h !== f.h) { bg = f; return; }
-    const w = f.w, h = f.h, n = w * h, A = f.a, B = bg.a;
-
-    // 露出補正: 明るさの比の中央値（コインは範囲の半分未満なので中央値には効かない）
-    const ratios = [];
-    for (let i = 0; i < n; i += 2) {
-      const lb = B[i * 3] + B[i * 3 + 1] + B[i * 3 + 2];
-      if (lb > 30) ratios.push((A[i * 3] + A[i * 3 + 1] + A[i * 3 + 2]) / lb);
-    }
-    ratios.sort((x, y) => x - y);
-    const g = Math.min(1.6, Math.max(0.6, ratios.length ? ratios[ratios.length >> 1] : 1));
-
-    // 色の差（RGB のうち一番大きい差）
-    const raw = new Uint8Array(n);
-    let all = 0;
-    for (let i = 0; i < n; i++) {
-      const k = i * 3;
-      const dd = Math.max(Math.abs(A[k] - g * B[k]), Math.abs(A[k + 1] - g * B[k + 1]), Math.abs(A[k + 2] - g * B[k + 2]));
-      if (dd > PIX_DIFF) { raw[i] = 1; all++; }
-    }
-    // 孤立した点を消す（上下左右のうち 2 つ以上も変化している画素だけ残す）
-    const m = new Uint8Array(n);
-    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-      if (raw[i] && raw[i - 1] + raw[i + 1] + raw[i - w] + raw[i + w] >= 2) m[i] = 1;
-    }
-    // いちばん大きい「かたまり」を探す
-    const lab = new Int32Array(n), stack = [];
-    let id = 0, best = 0, bestId = 0, box = null;
-    for (let i = 0; i < n; i++) {
-      if (!m[i] || lab[i]) continue;
-      id++; lab[i] = id; stack.push(i);
-      let area = 0, x0 = w, y0 = h, x1 = 0, y1 = 0;
-      while (stack.length) {
-        const p = stack.pop(), px = p % w, py = (p / w) | 0;
-        area++;
-        if (px < x0) x0 = px; if (px > x1) x1 = px; if (py < y0) y0 = py; if (py > y1) y1 = py;
-        if (px > 0 && m[p - 1] && !lab[p - 1]) { lab[p - 1] = id; stack.push(p - 1); }
-        if (px < w - 1 && m[p + 1] && !lab[p + 1]) { lab[p + 1] = id; stack.push(p + 1); }
-        if (py > 0 && m[p - w] && !lab[p - w]) { lab[p - w] = id; stack.push(p - w); }
-        if (py < h - 1 && m[p + w] && !lab[p + w]) { lab[p + w] = id; stack.push(p + w); }
-      }
-      if (area > best) { best = area; bestId = id; box = { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 }; }
-    }
-    const areaPct = 100 * best / n, allPct = 100 * all / n;
-    const global = allPct > GLOBAL_PCT;
-
-    // 判定（ヒステリシス＋連続フレーム）
-    const on = !global && areaPct >= cfg.th;
-    const off = global || areaPct < cfg.th * OFF_RATIO;
-    if (!present) { hitRun = on ? hitRun + 1 : 0; if (hitRun >= PRESENT_FRAMES) { present = true; missRun = 0; } }
-    else { missRun = off ? missRun + 1 : 0; if (missRun >= EMPTY_FRAMES) { present = false; hitRun = 0; } }
-
-    // 空のあいだは、変化していない画素だけ背景をゆっくり更新
-    if (!present && !global) {
-      for (let i = 0; i < n; i++) if (!raw[i]) {
-        const k = i * 3;
-        B[k] += (A[k] - B[k]) * 0.03; B[k + 1] += (A[k + 1] - B[k + 1]) * 0.03; B[k + 2] += (A[k + 2] - B[k + 2]) * 0.03;
-      }
-    }
-    // 照明が大きく変わったまま続いたら背景を取り直す（待機中だけ）
-    globalRun = global ? globalRun + 1 : 0;
-    if (globalRun >= GLOBAL_RELEARN_FRAMES && state === 'idle' && !holdOff && !setupOpen) { bg = f; resetDetect(); }
-
-    const blob = new Uint8Array(n);
-    if (bestId) for (let i = 0; i < n; i++) if (lab[i] === bestId) blob[i] = 1;
-    det = { area: areaPct, all: allPct, gain: g, global, box, raw: m, blob, w, h };
-  }
-  function coinHere() { return camOK ? present : simCoin; }
-
-  async function startCamera() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new Error('このページではカメラが使えません（HTTPS で開いてください）');
-    }
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: false, video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
-    });
-    video.srcObject = stream;
-    await video.play();
-    camOK = true;
-    setTimeout(learnBackground, 800);   // 起動時は受け皿が空の前提
-  }
+  function coinHere() { return espOk ? coinNow : simCoin; }
 
   // ================= 本体の流れ =================
   // idle → wait（コイン待ち）→ check（ゲートを開けて落ちたか確認）→ race → goal → idle
@@ -684,7 +568,7 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
     if (holdOff && coinHere()) {
       setMain(1, '準備中です', '受け皿にコインが残っています（係員が取り除いてください）', null);
     } else {
-      setMain(1, 'スタートボタンを押してください', camOK || !started ? 'キーホルダーは 1 個 100 円です' : 'カメラ未接続（c キーでコインを模擬）', 'start');
+      setMain(1, 'スタートボタンを押してください', espOk || !started ? 'キーホルダーは 1 個 100 円です' : 'ESP32 に接続できません（係員）', 'start');
     }
   }
 
@@ -803,65 +687,26 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
   holdToFire($('gear'), k => { $('gear').style.setProperty('--p', (k * 100) + '%'); }, () => openSetup());
 
   // ================= 周期処理 =================
-  let setupOpen = false;
+  let setupOpen = false, lastEspOk = null;
   function tick() {
-    analyze();
     if (holdOff && !coinHere()) { holdOff = false; if (state === 'idle' && !setupOpen) idle(); }
     // START を押さずにコインを入れた場合もそのまま進める
     if (state === 'idle' && !setupOpen && !holdOff && coinHere()) run(false);
-    if (setupOpen) drawPreview();
+    if (setupOpen) drawSensor();
+    // ESP32 との接続が変わったら待機画面の案内を更新
+    if (state === 'idle' && !setupOpen && espOk !== lastEspOk) { lastEspOk = espOk; idle(); }
   }
 
   // ================= 設定画面 =================
-  const preview = $('preview'), pctx = preview.getContext('2d');
-  const ovl = document.createElement('canvas'), octx = ovl.getContext('2d');
-  ovl.width = CW; ovl.height = CH;
-  function drawPreview() {
-    const W = preview.width, H = preview.height;
-    if (camOK && video.readyState >= 2) {
-      pctx.drawImage(video, 0, 0, W, H);
-    } else {
-      pctx.fillStyle = '#000'; pctx.fillRect(0, 0, W, H);
-      pctx.fillStyle = '#777'; pctx.font = '15px sans-serif';
-      pctx.fillText('カメラなし' + (camErr ? '：' + camErr : ''), 14, H - 16);
-    }
-    const { x0, y0 } = roiPx(), sx = W / CW, sy = H / CH;
-    if (det.raw && det.w) {
-      const img = octx.createImageData(det.w, det.h);
-      for (let i = 0; i < det.w * det.h; i++) {
-        const j = i * 4;
-        if (det.blob[i]) { img.data[j] = 52; img.data[j + 1] = 199; img.data[j + 2] = 89; img.data[j + 3] = 150; }
-        else if (det.raw[i]) { img.data[j] = 255; img.data[j + 1] = 69; img.data[j + 2] = 58; img.data[j + 3] = 120; }
-      }
-      octx.clearRect(0, 0, CW, CH);
-      octx.putImageData(img, 0, 0);
-      pctx.imageSmoothingEnabled = false;
-      pctx.drawImage(ovl, 0, 0, det.w, det.h, x0 * sx, y0 * sy, det.w * sx, det.h * sy);
-      pctx.imageSmoothingEnabled = true;
-    }
-    const r = cfg.roi;
-    pctx.lineWidth = 2; pctx.strokeStyle = 'rgba(255,255,255,.9)'; pctx.setLineDash([6, 5]);
-    pctx.strokeRect(r.x * W, r.y * H, r.w * W, r.h * H);
-    pctx.setLineDash([]);
-    if (det.box && det.area > 0.5) {
-      pctx.strokeStyle = coinHere() ? '#34c759' : '#ffb020';
-      pctx.strokeRect((x0 + det.box.x) * sx, (y0 + det.box.y) * sy, det.box.w * sx, det.box.h * sy);
-    }
+  function drawSensor() {
     const badge = $('badge');
-    if (det.global) { badge.textContent = '明るさが大きく変化'; badge.className = 'warn'; }
-    else if (coinHere()) { badge.textContent = 'コインあり'; badge.className = 'yes'; }
+    if (!espOk) { badge.textContent = simCoin ? 'コインあり（模擬）' : 'ESP32 に接続できません'; badge.className = simCoin ? 'yes' : 'warn'; }
+    else if (coinNow) { badge.textContent = 'コインあり'; badge.className = 'yes'; }
     else { badge.textContent = 'コインなし'; badge.className = ''; }
-    $('kvArea').textContent = det.area.toFixed(1) + ' %（全体の変化 ' + det.all.toFixed(0) + ' %）';
-    $('kvTh').textContent = cfg.th + ' %' + (cfg.coin ? '（記録したコイン ' + cfg.coin.toFixed(1) + ' %）' : '');
-    $('kvGain').textContent = '× ' + det.gain.toFixed(2);
-    const scale = 100 / Math.max(20, (cfg.coin || cfg.th * 2) * 1.3);
-    $('meterBar').style.width = Math.min(100, det.area * scale) + '%';
-    $('meterBar').style.background = det.area >= cfg.th ? '#34c759' : '#666';
-    $('meterTh').style.left = Math.min(100, cfg.th * scale) + '%';
-  }
-  function fitPreview() {
-    const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
-    preview.width = 480; preview.height = Math.round(480 * vh / vw);
+    $('kvCoins').textContent = coinsSeen === null ? '―' : coinsSeen + ' 枚';
+    let total = 0;
+    Object.keys(cfg.sales).forEach(d => { total += cfg.sales[d]; });
+    $('kvSales').textContent = total + ' 枚';
   }
   function renderSales() {
     const days = Object.keys(cfg.sales).sort();
@@ -883,12 +728,10 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
     setupOpen = true;
     document.body.classList.add('setup-open');
     $('setup').style.display = 'block';
-    $('th').value = cfg.th; $('thVal').textContent = cfg.th + ' %';
     $('vol').value = cfg.vol; $('volVal').textContent = cfg.vol + ' %';
     $('goSec').value = cfg.goSec; $('goSecVal').textContent = cfg.goSec + ' 秒';
     $('gateSec').value = cfg.gateSec; $('gateSecVal').textContent = cfg.gateSec + ' 秒';
     $('espUrl').value = cfg.esp;
-    fitPreview();
     renderSales();
     ping();
   }
@@ -902,39 +745,6 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
     idle();
   }
 
-  // 受け皿の範囲をドラッグで指定
-  let drag = null;
-  function pos(e) {
-    const r = preview.getBoundingClientRect(), p = e.touches ? e.touches[0] : e;
-    return { x: Math.min(1, Math.max(0, (p.clientX - r.left) / r.width)), y: Math.min(1, Math.max(0, (p.clientY - r.top) / r.height)) };
-  }
-  preview.addEventListener('touchstart', e => { e.preventDefault(); drag = pos(e); }, { passive: false });
-  preview.addEventListener('mousedown', e => { e.preventDefault(); drag = pos(e); });
-  function dMove(e) {
-    if (!drag) return; e.preventDefault();
-    const p = pos(e);
-    cfg.roi = { x: Math.min(drag.x, p.x), y: Math.min(drag.y, p.y), w: Math.abs(p.x - drag.x), h: Math.abs(p.y - drag.y) };
-  }
-  function dEnd() {
-    if (!drag) return; drag = null;
-    if (cfg.roi.w < 0.05 || cfg.roi.h < 0.05) cfg.roi = defaults.roi;
-    cfg.coin = null;   // 範囲が変わるとコインの大きさ(%)も変わる
-    save(); learnBackground();
-  }
-  preview.addEventListener('touchmove', dMove, { passive: false });
-  window.addEventListener('mousemove', dMove);
-  preview.addEventListener('touchend', dEnd);
-  window.addEventListener('mouseup', dEnd);
-
-  $('bgBtn').addEventListener('click', learnBackground);
-  $('coinBtn').addEventListener('click', () => {
-    if (det.global || det.area < 1) { alert('コインが見つかりません。受け皿に 1 枚置いてから押してください。'); return; }
-    cfg.coin = det.area;
-    cfg.th = Math.max(1, Math.round(det.area * 0.45 * 2) / 2);   // コインの大きさの 45%
-    $('th').value = cfg.th; $('thVal').textContent = cfg.th + ' %';
-    save();
-  });
-  $('th').addEventListener('input', e => { cfg.th = +e.target.value; $('thVal').textContent = cfg.th + ' %'; save(); });
   $('vol').addEventListener('input', e => {
     cfg.vol = +e.target.value; $('volVal').textContent = cfg.vol + ' %';
     if (gain) gain.gain.value = cfg.vol / 100; save();
@@ -1004,11 +814,10 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: var(--red); }
     started = true;
     document.body.classList.add('booted');
     unlockAudio();   // タップの最中に呼ぶ必要がある（await より前）
-    try { await startCamera(); }
-    catch (err) { camErr = err.message || err.name; }
-    setInterval(tick, 66);   // 約 15 fps
+    setInterval(tick, 66);
+    setInterval(pollCoin, POLL_MS);
     ping();
-    setInterval(() => { if (state === 'idle') ping(); }, PING_MS);
+    setInterval(() => { if (setupOpen) ping(); }, PING_MS);   // 設定画面のゲート情報
   }
   $('startApp').addEventListener('click', async () => {
     await boot();
